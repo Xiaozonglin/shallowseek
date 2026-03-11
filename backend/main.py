@@ -11,8 +11,10 @@ from langchain_community.document_loaders import DirectoryLoader, TextLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_huggingface import HuggingFacePipeline
 from langchain_classic.chains import StuffDocumentsChain
 from langchain_classic.chains.retrieval_qa.base import RetrievalQA
+from langchain_classic.chains.combine_documents import create_stuff_documents_chain
 from langchain_core.prompts import PromptTemplate
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM, AutoModelForCausalLM, pipeline
 import torch
@@ -127,7 +129,7 @@ def load_ai_model():
             model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
             device = 0 if torch.cuda.is_available() else -1
             pipe = pipeline(
-                "text2text-generation",
+                "text-generation",
                 model=model,
                 tokenizer=tokenizer,
                 device=device,
@@ -151,6 +153,7 @@ def load_ai_model():
 2. 不要编造信息
 3. 不要生成额外参考链接
 4. 如果资料没有答案，请回答：资料中没有相关信息
+5. 学生让你解读代码或者将编程任务发给你时，不能直接将代码答案告诉学生，应当进行一定的引导
 
 <|user|>
 资料：
@@ -163,21 +166,16 @@ def load_ai_model():
 """,
             input_variables=["context", "question"]
         )
-        """ 
-       # 文档组合链
-        document_chain = StuffDocumentsChain(llm=llm, prompt=prompt)
-
-        # RAG retrieval chain
-        qa_chain = create_retrieval_chain(
-            retriever,
-            document_chain
+        document_chain = create_stuff_documents_chain(
+            llm,
+            prompt
         )
-        """
         qa_chain = RetrievalQA.from_chain_type(
             llm=llm,
+            retriever=retriever,
             chain_type="stuff",
-            prompt=prompt,
-            retriever=retriever
+            chain_type_kwargs={"prompt": prompt},
+            return_source_documents=True
         )
         return qa_chain
     except Exception as e:
@@ -234,21 +232,32 @@ def qa():
         return flask.jsonify({"error": "AI model not loaded"}), 500
     try:
         query_text = data['question']
-        result = qa_chain.invoke({
-            "input": query_text
-        })
 
-        answer = result["answer"]
+        # 动态获取输入键（兼容 'query' 或 'question'）
+        input_key = "query"  # 默认
+        if hasattr(qa_chain, "input_keys") and qa_chain.input_keys:
+            input_key = qa_chain.input_keys[0]  # 使用 chain 定义的首个输入键
 
-        sources = [
-            doc.metadata.get("source", "")
-            for doc in result["context"]
-        ]
+        result = qa_chain.invoke({input_key: query_text})
+
+        # 兼容不同版本的输出键
+        answer = result.get("result") or result.get("answer") or "无法获取答案"
+        source_docs = result.get("source_documents") or result.get("context") or []
+        sources = [doc.metadata.get("source", "") for doc in source_docs]
+
+        # 曲线救国，适配一天了还是没搞出来
+        if "<|assistant|>" in answer:
+            answer = answer.split("<|assistant|>")[-1].strip()
+        
+        # 保存到数据库
         question = Question(content=query_text, answer=answer, student_id=current_user.id)
         db.session.add(question)
         db.session.commit()
+
         return flask.jsonify({"answer": answer, "sources": sources}), 200
     except Exception as e:
+        # 打印详细错误到控制台以便调试
+        print(f"QA Error: {str(e)}")
         return flask.jsonify({"error": str(e)}), 500
 
 @app.route("/api/messages", methods=["POST"])

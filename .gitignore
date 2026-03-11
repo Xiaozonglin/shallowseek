@@ -1,5 +1,4 @@
 .idea
-docs
 
 faiss_index
 *.db
