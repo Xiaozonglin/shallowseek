@@ -3,3 +3,6 @@
 faiss_index
 *.db
 model_weights
+rag-embedding
+
+node_modules
