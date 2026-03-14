@@ -106,42 +106,83 @@
 
 ### 2.4 学生提问
 
-**接口路径**：`/api/qa`
-**请求方法**：`POST`
-**功能描述**：学生向AI提问，系统记录问题并返回答案
+基本信息
+接口地址: /api/qa
+请求方法: POST
+认证要求: 需要 Cookie (Session) 认证
+数据格式：
+请求：application/json
+响应：text/event-stream (SSE)
 
-**请求参数**：
-
-| 参数名 | 类型 | 必填 | 描述 |
-| :--- | :--- | :--- | :--- |
-| `question` | `string` | 是 | 问题内容 |
-
-**请求示例**：
+请求参数 (Body)
 ```json
 {
-  "question": "什么是机器学习？"
+    "question": "如何配置 RTX 5060 的开发环境？"
 }
 ```
 
-**返回结果**：
-- 成功：`200 OK`
-  ```json
-  {
-    "answer": "机器学习是人工智能的一个分支，它使计算机能够从数据中学习而不需要明确编程..."
-  }
-  ```
-- 失败：`400 Bad Request`
-  ```json
-  {
-    "error": "Missing question"
-  }
-  ```
-- 失败：`500 Internal Server Error`
-  ```json
-  {
-    "error": "AI model not loaded" // 或其他错误信息
-  }
-  ```
+响应格式 (Stream)
+接口会持续推送以 data:  开头的消息块，每个块是一个独立的 JSON 字符串。
+字段名类型说明AI 生成的当前字符/片段（包含空格和换行符）
+响应示例 (数据流):
+```json
+data: {"token": "配"}
+data: {"token": "置"}
+data: {"token": " RTX"}
+data: {"token": " 5060"}
+```
+
+4. 前端实现参考 (JavaScript)
+注意：axios 默认不支持流式响应处理。请使用原生的 fetch API 或专门的 SSE 库。
+方案 A：使用原生 fetch (推荐)
+```javascript
+async function getAIResponse(question) {
+    const response = await fetch('/api/qa', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ question: question })
+    });
+
+    if (!response.ok) throw new Error('网络响应错误');
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let fullText = ""; // 用于存储完整回答
+
+    // 循环读取流数据
+    while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        const chunk = decoder.decode(value, { stream: true });
+        
+        // SSE 格式处理：解析以 data: 开头的行
+        const lines = chunk.split('\n');
+        for (const line of lines) {
+            if (line.trim().startsWith('data: ')) {
+                try {
+                    const jsonString = line.replace('data: ', '');
+                    const data = JSON.parse(jsonString);
+                    
+                    // 实时更新 UI
+                    fullText += data.token;
+                    updateUI(fullText); // 你的 UI 更新函数
+                } catch (e) {
+                    console.error("解析流数据失败", e);
+                }
+            }
+        }
+    }
+}
+
+function updateUI(text) {
+    const container = document.getElementById('chat-content');
+    container.innerText = text; // 或者使用 Markdown 解析器
+}
+```
+
 
 ### 2.5 老师查看问题统计
 

