@@ -24,7 +24,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_huggingface import HuggingFaceEmbeddings
 from transformers import AutoTokenizer, AutoModelForCausalLM, TextIteratorStreamer
-from sentence_transformers import SentenceTransformer
+from sentence_transformers import SentenceTransformer, util
 
 # ========================== 基础配置 ==========================
 load_dotenv()
@@ -58,7 +58,12 @@ class User(UserMixin, db.Model):
 class Question(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     content = db.Column(db.String(1000), nullable=False)
-    answer = db.Column(db.String(2000), nullable=True)
+    answer = db.Column(db.String(2000), nullable=True) # AI回答
+    
+    # --- 权威答案相关字段 ---
+    authoritative_answer = db.Column(db.String(2000), nullable=True) # 老师提供的权威答案
+    teacher_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=True) # 提供权威答案的老师
+    
     timestamp = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
     student_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
 
@@ -69,7 +74,6 @@ class Message(db.Model):
     sender_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     status = db.Column(db.String(20), nullable=False, default='unread')
     
-    # --- 新增：老师回复相关字段 ---
     reply_content = db.Column(db.String(2000), nullable=True)
     reply_timestamp = db.Column(db.DateTime, nullable=True)
     replier_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=True)
@@ -79,7 +83,6 @@ with app.app_context():
 
 # ========================== AI 模型初始化 ==========================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-# 确保权重存在项目根目录下的对应文件夹
 MODEL_PATH = os.path.abspath(os.path.join(BASE_DIR, "..", "model_weights"))
 EMBED_PATH = os.path.abspath(os.path.join(BASE_DIR, "..", "rag-embedding"))
 
@@ -87,29 +90,26 @@ os.makedirs(MODEL_PATH, exist_ok=True)
 os.makedirs(EMBED_PATH, exist_ok=True)
 
 def is_locally_available(path):
-    # 检查是否存在核心配置文件
     return os.path.exists(os.path.join(path, "config.json"))
 
 print("🚀 正在初始化 RTX 5060 加速引擎...")
 
-# 1. 加载 LLM (Qwen)
+# 1. 加载 LLM
 if not is_locally_available(MODEL_PATH):
     print("🌐 第一次运行：正在从镜像站拉取 Qwen 模型...")
     t_tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-1.5B-Instruct", trust_remote_code=True)
     t_model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen2.5-1.5B-Instruct", torch_dtype=torch.float16, device_map="auto", trust_remote_code=True)
     t_tokenizer.save_pretrained(MODEL_PATH)
     t_model.save_pretrained(MODEL_PATH)
-    print(f"✅ Qwen 已保存至: {MODEL_PATH}")
 
 tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, local_files_only=True, trust_remote_code=True)
 model = AutoModelForCausalLM.from_pretrained(MODEL_PATH, torch_dtype=torch.float16, device_map="auto", local_files_only=True, trust_remote_code=True)
 
-# 2. 加载 Embedding (BGE)
+# 2. 加载 Embedding
 if not is_locally_available(EMBED_PATH):
     print("🌐 第一次运行：正在拉取 BGE 向量模型...")
     e_model = SentenceTransformer("BAAI/bge-small-zh-v1.5")
-    e_model.save(EMBED_PATH) # 关键：save 方法会直接平铺文件在根目录
-    print(f"✅ Embedding 已保存至: {EMBED_PATH}")
+    e_model.save(EMBED_PATH)
 
 embedding = HuggingFaceEmbeddings(
     model_name=EMBED_PATH, 
@@ -142,10 +142,34 @@ def get_history(user_id):
     records.reverse()
     return "\n".join([f"问：{r.content}\n答：{r.answer}" for r in records])
 
+def find_authoritative_knowledge(query):
+    """
+    检索数据库中老师提供的权威答案
+    """
+    # 查找所有包含权威答案的问题
+    auth_questions = Question.query.filter(Question.authoritative_answer != None).all()
+    if not auth_questions:
+        return ""
+    
+    # 简单的语义匹配逻辑：通过 Embedding 计算当前问题与已有权威问题的相似度
+    query_vec = embedding.embed_query(query)
+    best_match = None
+    max_sim = 0.0
+    
+    for q in auth_questions:
+        # 这里为了演示使用实时计算，实际生产环境建议将权威答案也存入 FAISS
+        q_vec = embedding.embed_query(q.content)
+        sim = util.cos_sim(query_vec, q_vec).item()
+        if sim > max_sim:
+            max_sim = sim
+            best_match = q
+            
+    # 如果相似度高于阈值 (例如 0.8)，则作为权威参考提供
+    if best_match and max_sim > 0.8:
+        return f"\n【老师提供的权威参考内容 (匹配度: {max_sim:.2f})】:\n{best_match.authoritative_answer}\n"
+    return ""
+
 def check_and_run_tools(query):
-    """
-    AI 工具预处理模块：利用极速的单次推理判断是否需要调用工具
-    """
     system_msg = (
         "你是一个工具决策器。根据用户提问，判断是否需要调用外部工具。可用工具：\n"
         "1. fetch_url(url: 网址) - 用于访问特定网址。\n"
@@ -157,8 +181,6 @@ def check_and_run_tools(query):
     
     prompt = f"<|im_start|>system\n{system_msg}<|im_end|>\n<|im_start|>user\n{query}<|im_end|>\n<|im_start|>assistant\n"
     inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
-    
-    # 极速推理，限制最多输出 30 个 token
     outputs = model.generate(**inputs, max_new_tokens=30, temperature=0.1, do_sample=False)
     response = tokenizer.decode(outputs[0][inputs.input_ids.shape[1]:], skip_special_tokens=True).strip()
     
@@ -168,11 +190,10 @@ def check_and_run_tools(query):
         try:
             res = requests.get(url, timeout=5, headers={"User-Agent": "Mozilla/5.0"})
             soup = BeautifulSoup(res.text, 'html.parser')
-            text = soup.get_text(separator=' ', strip=True)[:1000] # 截取前 1000 字防止爆显存
+            text = soup.get_text(separator=' ', strip=True)[:1000]
             tool_result = f"\n【AI工具: 从 {url} 抓取的内容】:\n{text}\n"
         except Exception as e:
             tool_result = f"\n【AI工具: 访问网页失败】: {str(e)}\n"
-            
     elif response.startswith("CALL:calculate|"):
         expr = response.split("|", 1)[1].strip()
         try:
@@ -189,7 +210,6 @@ def check_and_run_tools(query):
 def load_user(user_id):
     return db.session.get(User, int(user_id))
 
-# ... (注册和登录逻辑与之前保持一致) ...
 @app.route("/api/register", methods=["POST"])
 def register():
     data = flask.request.json
@@ -222,6 +242,50 @@ def logout():
     logout_user()
     return flask.jsonify({"message": "Logout successful"}), 200
 
+# ========================== 权威答案管理 (老师专属) ==========================
+
+@app.route("/api/questions/pending", methods=["GET"])
+@login_required
+def get_pending_questions():
+    """获取所有学生的问题，方便老师查看并提供权威回复"""
+    if current_user.role != 'teacher':
+        return flask.jsonify({"error": "Permission denied"}), 403
+    
+    questions = Question.query.order_by(Question.timestamp.desc()).all()
+    result = []
+    for q in questions:
+        student = db.session.get(User, q.student_id)
+        result.append({
+            "id": q.id,
+            "content": q.content,
+            "ai_answer": q.answer,
+            "authoritative_answer": q.authoritative_answer,
+            "student_name": student.username if student else "Unknown",
+            "timestamp": q.timestamp.isoformat()
+        })
+    return flask.jsonify(result), 200
+
+@app.route("/api/questions/<int:q_id>/authoritative", methods=["POST"])
+@login_required
+def set_authoritative_answer(q_id):
+    """老师针对某个问题提供权威答案"""
+    if current_user.role != 'teacher':
+        return flask.jsonify({"error": "Permission denied"}), 403
+    
+    data = flask.request.json
+    if not data or 'answer' not in data:
+        return flask.jsonify({"error": "Missing answer content"}), 400
+    
+    question = db.session.get(Question, q_id)
+    if not question:
+        return flask.jsonify({"error": "Question not found"}), 404
+    
+    question.authoritative_answer = data['answer']
+    question.teacher_id = current_user.id
+    db.session.commit()
+    
+    return flask.jsonify({"message": "Authoritative answer updated. AI will now prioritize this info."}), 200
+
 # ========================== AI 问答接口 ==========================
 @app.route("/api/qa", methods=["POST"])
 @login_required
@@ -230,23 +294,28 @@ def qa():
     query = data.get('question')
     if not query: return flask.jsonify({"error": "Empty question"}), 400
 
-    # 1. AI 极速前置工具推断 (获取网页或计算数学)
+    # 1. 核心：检索老师提供的权威知识 (最高优先级)
+    authoritative_context = find_authoritative_knowledge(query)
+
+    # 2. AI 极速前置工具推断
     tool_context = check_and_run_tools(query)
 
-    # 2. 检索本地知识库
+    # 3. 检索本地文件知识库
     context = ""
     if retriever:
         docs = retriever.invoke(query)
         context = "\n".join([d.page_content for d in docs])
     
-    # 3. 获取对话历史
+    # 4. 获取对话历史
     history = get_history(current_user.id)
 
-    # 4. 构造包含所有工具反馈的终极 Prompt
+    # 5. 构造 Prompt
+    # 注意：权威答案放在了最显眼的位置，并要求 AI 优先参考
     full_prompt = (
-        f"<|im_start|>system\n你是学习助手。请参考以下资料和历史回答问题。\n\n"
-        f"【本地资料】:\n{context}\n\n"
-        f"{tool_context}\n"  # 注入工具运行结果
+        f"<|im_start|>system\n你是学习助手。请参考以下资料回答。如果【权威参考】存在且与问题相关，请务必以该答案为准。\n\n"
+        f"【权威参考】:\n{authoritative_context if authoritative_context else '暂无老师提供的权威参考资料。'}\n\n"
+        f"【本地资料库】:\n{context}\n\n"
+        f"{tool_context}\n"
         f"【历史记录】:\n{history}<|im_end|>\n"
         f"<|im_start|>user\n{query}<|im_end|>\n"
         f"<|im_start|>assistant\n"
@@ -255,7 +324,6 @@ def qa():
     def generate():
         streamer = TextIteratorStreamer(tokenizer, skip_prompt=True, timeout=10)
         inputs = tokenizer(full_prompt, return_tensors="pt").to(model.device)
-        
         generation_kwargs = dict(inputs, streamer=streamer, max_new_tokens=512, temperature=0.7, do_sample=True)
         thread = threading.Thread(target=model.generate, kwargs=generation_kwargs)
         thread.start()
@@ -278,7 +346,6 @@ def qa():
 @app.route("/api/messages", methods=["GET", "POST"])
 @login_required
 def handle_messages():
-    # 1. 提交新留言 (学生可用)
     if flask.request.method == "POST":
         data = flask.request.json
         if not data or 'content' not in data:
@@ -288,7 +355,6 @@ def handle_messages():
         db.session.add(message)
         db.session.commit()
         
-        # 判断环境是否配置了真实的邮件服务
         if app.config.get('MAIL_SERVER') and app.config['MAIL_SERVER'] != 'smtp.example.com':
             try:
                 teachers = User.query.filter_by(role='teacher').all()
@@ -301,16 +367,12 @@ def handle_messages():
                     mail.send(msg)
             except Exception as e:
                 print(f"Error sending email: {e}")
-                
         return flask.jsonify({"message": "Message sent successfully"}), 201
 
-    # 2. 获取留言列表
     if flask.request.method == "GET":
         if current_user.role == 'student':
-            # 学生只能看自己发出的留言及老师的回复
             msgs = Message.query.filter_by(sender_id=current_user.id).order_by(Message.timestamp.desc()).all()
         else:
-            # 老师可以看到所有留言
             msgs = Message.query.order_by(Message.timestamp.desc()).all()
             
         result = []
@@ -330,23 +392,18 @@ def handle_messages():
 @app.route("/api/messages/<int:msg_id>/reply", methods=["POST"])
 @login_required
 def reply_message(msg_id):
-    # 仅老师可以回复
     if current_user.role != 'teacher':
         return flask.jsonify({"error": "Permission denied"}), 403
-        
     data = flask.request.json
     if not data or 'reply_content' not in data:
         return flask.jsonify({"error": "Missing reply content"}), 400
-        
     message = db.session.get(Message, msg_id)
     if not message:
         return flask.jsonify({"error": "Message not found"}), 404
-        
     message.reply_content = data['reply_content']
     message.reply_timestamp = datetime.utcnow()
     message.replier_id = current_user.id
     message.status = 'replied'
-    
     db.session.commit()
     return flask.jsonify({"message": "Replied successfully"}), 200
 
