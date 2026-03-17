@@ -14,6 +14,28 @@
         <div class="stat-number">{{ Object.keys(stats.questions_by_student || {}).length }}</div>
       </div>
     </div>
+    <!-- 权威答案管理 -->
+    <div class="auth-management">
+      <h2>📝 权威答案管理</h2>
+      <button @click="fetchPendingQuestions" class="refresh-btn">刷新问题列表</button>
+
+      <div v-if="pendingQuestions.length === 0" class="empty">暂无待处理问题。</div>
+      <div v-else class="question-list">
+        <div v-for="q in pendingQuestions" :key="q.id" class="question-card">
+          <h4>来自: {{ q.student_name }}</h4>
+          <p><strong>问题:</strong> {{ q.content }}</p>
+          <p><strong>AI初步答案:</strong> {{ q.ai_answer }}</p>
+
+          <div v-if="q.authoritative_answer">
+            <p><strong>✅ 已设权威答案:</strong> {{ q.authoritative_answer }}</p>
+          </div>
+          <div v-else class="auth-form">
+            <textarea v-model="q.newAuthAnswer" placeholder="在此输入您的权威答案..."></textarea>
+            <button @click="submitAuthAnswer(q)">提交为权威答案</button>
+          </div>
+        </div>
+      </div>
+    </div>
 
     <!-- AI总结报告 -->
     <div class="summary-section" v-if="stats.summary">
@@ -41,6 +63,22 @@
         </div>
       </div>
     </div>
+    <!-- 在合适位置加入留言管理模块 -->
+    <div class="message-management">
+      <h2>💬 学生留言与回复</h2>
+      <div v-for="msg in messages" :key="msg.id" class="message-card">
+        <p><strong>{{ msg.sender }} 留言:</strong> {{ msg.content }}</p>
+        <small>{{ msg.timestamp }}</small>
+
+        <div v-if="msg.reply_content">
+          <p><strong>您的回复:</strong> {{ msg.reply_content }}</p>
+        </div>
+        <div v-else>
+          <textarea v-model="msg.newReply" placeholder="输入回复内容..."></textarea>
+          <button @click="replyToMessage(msg)">发送回复</button>
+        </div>
+      </div>
+    </div>
 
     <!-- 加载和错误状态 -->
     <div v-if="loading" class="loading">数据加载中...</div>
@@ -60,40 +98,104 @@ export default {
   setup() {
     const router = useRouter()
     const stats = ref({})
+    const pendingQuestions = ref([])
+    const messages = ref([])
     const loading = ref(false)
     const error = ref('')
 
-    // 获取统计数据
+    // 1. 获取数据统计
     const fetchStats = async () => {
       loading.value = true
       error.value = ''
       try {
         const response = await axios.get('/api/questions/stats')
         stats.value = response.data
-        console.log('获取统计数据成功:', stats.value)
       } catch (err) {
         console.error('获取数据失败:', err)
-        error.value = err.response?.data?.error || '获取数据失败，请检查网络连接'
+        error.value = err.response?.data?.error || '获取数据失败'
       } finally {
         loading.value = false
       }
     }
 
-    // 退出登录
+    // 2. 获取待处理问题
+    const fetchPendingQuestions = async () => {
+      try {
+        const response = await axios.get('/api/questions/pending')
+        pendingQuestions.value = response.data.map(q => ({ ...q, newAuthAnswer: '' }))
+      } catch (err) {
+        console.error('获取问题列表失败:', err)
+        alert('获取问题列表失败')
+      }
+    }
+
+    // 3. 提交权威答案
+    const submitAuthAnswer = async (question) => {
+      if (!question.newAuthAnswer.trim()) {
+        alert('请输入答案内容')
+        return
+      }
+      try {
+        await axios.post(`/api/questions/${question.id}/authoritative`, {
+          answer: question.newAuthAnswer
+        })
+        alert('权威答案已提交！')
+        question.authoritative_answer = question.newAuthAnswer
+        question.newAuthAnswer = ''
+      } catch (err) {
+        console.error('提交失败:', err)
+        alert('提交失败')
+      }
+    }
+
+    // 4. 获取留言
+    const fetchMessages = async () => {
+      try {
+        const response = await axios.get('/api/messages')
+        messages.value = response.data.map(m => ({ ...m, newReply: '' }))
+      } catch (err) {
+        console.error('获取留言失败:', err)
+      }
+    }
+
+    // 5. 回复留言
+    const replyToMessage = async (msg) => {
+      try {
+        await axios.post(`/api/messages/${msg.id}/reply`, {
+          reply_content: msg.newReply
+        })
+        alert('回复成功！')
+        msg.reply_content = msg.newReply
+        msg.newReply = ''
+      } catch (err) {
+        console.error('回复失败:', err)
+        alert('回复失败')
+      }
+    }
+
+    // 6. 退出登录
     const logout = () => {
-      // 可以在这里调用后端的 /api/logout
       router.push('/login')
     }
 
-    // 页面加载时获取数据
+    // 页面加载时，一次性获取所有初始数据
     onMounted(() => {
       fetchStats()
+      fetchPendingQuestions()
+      fetchMessages()
     })
 
+    // 必须返回所有模板中使用的变量和方法
     return {
       stats,
+      pendingQuestions,
+      messages,
       loading,
       error,
+      fetchPendingQuestions,
+      submitAuthAnswer,
+      fetchMessages,
+      replyToMessage,
       logout
     }
   }

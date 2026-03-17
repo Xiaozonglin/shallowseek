@@ -20,9 +20,17 @@
         </div>
 
         <!-- 答案显示区域 -->
-        <div v-if="answer" class="answer-section">
-          <h3>AI答案：</h3>
-          <div class="answer-content">{{ answer }}</div>
+        <div v-if="streamingAnswer || answer" class="answer-section">
+  <h3>AI答案：</h3>
+  <!-- 区域1：流式回答实时显示（正在生成时显示） -->
+  <div v-if="streamingAnswer" class="streaming-answer">
+    {{ streamingAnswer }}
+    <span class="streaming-cursor">█</span> <!-- 可选的光标动画 -->
+  </div>
+  <!-- 区域2：最终答案静态显示（流结束后显示） -->
+  <div v-else class="answer-content">
+    {{ answer }}
+  </div>
           
           <!-- 新增：答案来源展示 -->
           <div v-if="sources && sources.length > 0" class="sources-section">
@@ -83,45 +91,76 @@ import axios from 'axios'
 export default {
   name: 'StudentView',
   setup() {
-    const question = ref('')
-    const answer = ref('')
-    const sources = ref([])
-    const loading = ref(false)
-    const history = ref([])
-    const messageToTeacher = ref('')
-    const sendingMessage = ref(false)
-    const messageSuccess = ref(false)
+    const question = ref('');
+    const answer = ref('');
+    const streamingAnswer = ref('');
+    const sources = ref([]);
+    const loading = ref(false);
+    const history = ref([]);
+    const messageToTeacher = ref('');
+    const sendingMessage = ref(false);
+    const messageSuccess = ref(false);
 
     // 提交问题
     const submitQuestion = async () => {
-      if (!question.value.trim()) return
-      
-      loading.value = true
-      answer.value = ''
-      
+      if (!question.value.trim()) return;
+
+      loading.value = true;
+      answer.value = '';
+      streamingAnswer.value = ''; // 清空实时流
+
       try {
-        const response = await axios.post('/api/qa', {
-          question: question.value
-        })
-        
-        answer.value = response.data.answer
-        sources.value = response.data.sources || []
-        // 将新问答加入历史
+        const response = await fetch('/api/qa', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ question: question.value }),
+          credentials: 'include' // 重要：确保发送 Cookie
+        });
+
+        if (!response.ok || !response.body) {
+          throw new Error(`HTTP error! status: ${response.status}`);
+        }
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          const chunk = decoder.decode(value);
+          const lines = chunk.split('\n');
+
+          for (const line of lines) {
+            if (line.startsWith('data: ')) {
+              try {
+                const data = JSON.parse(line.slice(6));
+                if (data.token) {
+                  streamingAnswer.value += data.token; // 实时追加
+                }
+              } catch (e) {
+                console.warn('解析流数据失败:', e, line);
+              }
+            }
+          }
+        }
+
+        // 流结束后，将最终结果存入 answer 和历史记录
+        answer.value = streamingAnswer.value;
         history.value.unshift({
           question: question.value,
-          answer: response.data.answer,
-          sources: response.data.sources
-        })
-        question.value = '' // 清空输入框
-        
-      } catch (error) {
-        console.error('提问失败:', error)
-        alert(error.response?.data?.error || '提问失败，请检查网络或后端服务')
-      } finally {
-        loading.value = false
-      }
-    }
+          answer: streamingAnswer.value
+        });
+        question.value = '';
 
+      } catch (error) {
+        console.error('提问失败:', error);
+        alert('提问失败，请检查网络连接或控制台信息。');
+      } finally {
+        loading.value = false;
+        streamingAnswer.value = ''; // 可选：清空实时流显示
+      }
+    };
     // 发送留言给老师
     const sendMessageToTeacher = async () => {
       if (!messageToTeacher.value.trim()) return
