@@ -1,5 +1,11 @@
 <template>
   <div class="student-container">
+    <!-- 添加一个学生页面的登出按钮（可选） -->
+    <div class="student-header">
+      <h1>学生工作台</h1>
+      <button @click="logout" class="student-logout-btn">退出登录</button>
+    </div>
+
     <div class="main-content">
       <!-- 左侧：提问区域 -->
       <div class="qa-section">
@@ -21,16 +27,16 @@
 
         <!-- 答案显示区域 -->
         <div v-if="streamingAnswer || answer" class="answer-section">
-  <h3>AI答案：</h3>
-  <!-- 区域1：流式回答实时显示（正在生成时显示） -->
-  <div v-if="streamingAnswer" class="streaming-answer">
-    {{ streamingAnswer }}
-    <span class="streaming-cursor">█</span> <!-- 可选的光标动画 -->
-  </div>
-  <!-- 区域2：最终答案静态显示（流结束后显示） -->
-  <div v-else class="answer-content">
-    {{ answer }}
-  </div>
+          <h3>AI答案：</h3>
+          <!-- 区域1：流式回答实时显示（正在生成时显示） -->
+          <div v-if="streamingAnswer" class="streaming-answer">
+            {{ streamingAnswer }}
+            <span class="streaming-cursor">█</span> <!-- 可选的光标动画 -->
+          </div>
+          <!-- 区域2：最终答案静态显示（流结束后显示） -->
+          <div v-else class="answer-content">
+            {{ answer }}
+          </div>
           
           <!-- 新增：答案来源展示 -->
           <div v-if="sources && sources.length > 0" class="sources-section">
@@ -86,11 +92,13 @@
 
 <script>
 import { ref, onMounted } from 'vue'
+import { useRouter } from 'vue-router'  // 新增：导入 useRouter
 import axios from 'axios'
 
 export default {
   name: 'StudentView',
   setup() {
+    const router = useRouter()  // 新增：获取路由实例
     const question = ref('');
     const answer = ref('');
     const streamingAnswer = ref('');
@@ -100,6 +108,20 @@ export default {
     const messageToTeacher = ref('');
     const sendingMessage = ref(false);
     const messageSuccess = ref(false);
+
+    // 新增：登出方法
+    const logout = async () => {
+      try {
+        // 发送登出请求到后端
+        await axios.post('/api/logout')
+        console.log('学生登出成功')
+      } catch (error) {
+        console.error('学生登出失败:', error)
+      } finally {
+        // 无论成功失败，都跳转到登录页
+        router.push('/login')
+      }
+    }
 
     // 提交问题
     const submitQuestion = async () => {
@@ -161,6 +183,7 @@ export default {
         streamingAnswer.value = ''; // 可选：清空实时流显示
       }
     };
+    
     // 发送留言给老师
     const sendMessageToTeacher = async () => {
       if (!messageToTeacher.value.trim()) return
@@ -196,6 +219,7 @@ export default {
       messageToTeacher,
       sendingMessage,
       messageSuccess,
+      logout,  // 新增：返回 logout 方法
       submitQuestion,
       sendMessageToTeacher
     }
@@ -204,6 +228,37 @@ export default {
 </script>
 
 <style scoped>
+/* 新增样式：学生头部区域和登出按钮 */
+.student-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 30px;
+  padding-bottom: 15px;
+  border-bottom: 2px solid #667eea;
+}
+
+.student-header h1 {
+  color: #333;
+  margin: 0;
+}
+
+.student-logout-btn {
+  padding: 8px 20px;
+  background: linear-gradient(135deg, #e74c3c 0%, #c0392b 100%);
+  color: white;
+  border: none;
+  border-radius: 6px;
+  font-size: 16px;
+  cursor: pointer;
+  transition: transform 0.2s;
+}
+
+.student-logout-btn:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(231, 76, 60, 0.4);
+}
+
 .student-container {
   padding: 30px;
   max-width: 1200px;

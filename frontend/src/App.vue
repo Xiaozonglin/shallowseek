@@ -19,6 +19,7 @@
 <script>
 import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import axios from 'axios'
 
 export default {
   name: 'App',
@@ -29,19 +30,33 @@ export default {
     // 判断当前是否是登录页
     const isLoginPage = computed(() => route.path === '/login')
     
-    // 模拟用户信息（后续会从登录接口获取）
-    const user = { username: '张三' }
-    
     // 退出登录
-    const handleLogout = () => {
-      // 调用后端退出接口
-      // 然后跳转到登录页
-      router.push('/login')
+    const handleLogout = async () => {
+      try {
+        // 发送登出请求到后端
+        const response = await axios.post('/api/logout')
+        
+        if (response.status === 200 && response.data.message === 'Logout successful') {
+          console.log('登出成功')
+          // 清除前端的用户状态（如果有的话）
+          // 例如：localStorage.removeItem('user')
+          
+          // 跳转到登录页
+          router.push('/login')
+        } else {
+          console.error('登出响应异常:', response.data)
+          // 即使响应异常，也跳转到登录页
+          router.push('/login')
+        }
+      } catch (error) {
+        console.error('登出失败:', error)
+        // 即使请求失败，也跳转到登录页（保证用户可以重新登录）
+        router.push('/login')
+      }
     }
     
     return {
       isLoginPage,
-      user,
       handleLogout
     }
   }

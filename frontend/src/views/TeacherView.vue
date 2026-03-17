@@ -174,10 +174,18 @@ export default {
     }
 
     // 6. 退出登录
-    const logout = () => {
-      router.push('/login')
+    const logout = async () => {
+      try {
+        // 发送登出请求到后端
+        await axios.post('/api/logout')
+        console.log('老师登出成功')
+      } catch (error) {
+        console.error('老师登出失败:', error)
+      } finally {
+        // 无论成功失败，都跳转到登录页
+        router.push('/login')
+      }
     }
-
     // 页面加载时，一次性获取所有初始数据
     onMounted(() => {
       fetchStats()
