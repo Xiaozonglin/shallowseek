@@ -35,6 +35,45 @@
 
 ```
 
+### 1.3 检查登录状态
+
+* **路径**：`/api/check-auth`
+* **方法**：`GET`
+* **描述**：检查当前用户的登录状态和角色信息
+* **返回示例**：
+
+**已登录**：
+```json
+{
+  "authenticated": true,
+  "user": {
+    "id": 1,
+    "username": "student1",
+    "email": "student1@example.com",
+    "role": "student"
+  }
+}
+```
+
+**未登录**：
+```json
+{
+  "authenticated": false
+}
+```
+* **状态码**：已登录返回200，未登录返回401
+
+### 1.4 用户登出
+
+* **路径**：`/api/logout`
+* **方法**：`POST`
+* **描述**：用户登出，清除session
+* **返回示例**：
+
+```json
+{ "message": "Logout successful" }
+```
+
 
 
 ---

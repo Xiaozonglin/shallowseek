@@ -19,7 +19,13 @@ export default defineConfig({
     proxy: {
       '/api': {
         target: 'http://127.0.0.1:5000',  // 您的后端地址
-        changeOrigin: true
+        changeOrigin: true,
+        configure: (proxy, options) => {
+          // 禁用代理缓冲
+          proxy.on('proxyReq', (proxyReq, req, res) => {
+            proxyReq.setHeader('X-Accel-Buffering', 'no');
+          });
+        }
       }
     }
   }

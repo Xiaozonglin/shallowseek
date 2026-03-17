@@ -28,14 +28,13 @@
         <!-- 答案显示区域 -->
         <div v-if="streamingAnswer || answer" class="answer-section">
           <h3>AI答案：</h3>
-          <!-- 区域1：流式回答实时显示（正在生成时显示） -->
-          <div v-if="streamingAnswer" class="streaming-answer">
-            {{ streamingAnswer }}
-            <span class="streaming-cursor">█</span> <!-- 可选的光标动画 -->
+          <!-- 流式回答实时显示 -->
+          <div v-if="streamingAnswer" class="streaming-wrapper">
+            <div class="streaming-answer markdown-body" v-html="renderedStreamingAnswer"></div>
+            <span class="streaming-cursor">█</span>
           </div>
-          <!-- 区域2：最终答案静态显示（流结束后显示） -->
-          <div v-else class="answer-content">
-            {{ answer }}
+          <!-- 静态答案显示 -->
+          <div v-if="!streamingAnswer && answer" class="answer-content markdown-body" v-html="renderedAnswer">
           </div>
           
           <!-- 新增：答案来源展示 -->
@@ -91,9 +90,10 @@
 </template>
 
 <script>
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, computed } from 'vue'
 import { useRouter } from 'vue-router'  // 新增：导入 useRouter
 import axios from 'axios'
+import { marked } from 'marked'
 
 export default {
   name: 'StudentView',
@@ -108,6 +108,31 @@ export default {
     const messageToTeacher = ref('');
     const sendingMessage = ref(false);
     const messageSuccess = ref(false);
+
+    // 配置marked选项
+    marked.setOptions({
+      breaks: true, // 支持换行
+      gfm: true // 支持GitHub风格的Markdown
+    })
+
+    // 计算属性：将markdown转换为HTML
+    const renderedAnswer = computed(() => {
+      if (!answer.value) return ''
+      // 过滤特殊标记
+      let cleanAnswer = answer.value
+        .replace(/<\|im_end\|>/g, '')
+        .replace(/<\|im_start\|>/g, '')
+      return marked(cleanAnswer)
+    })
+
+    const renderedStreamingAnswer = computed(() => {
+      if (!streamingAnswer.value) return ''
+      // 过滤特殊标记
+      let cleanAnswer = streamingAnswer.value
+        .replace(/<\|im_end\|>/g, '')
+        .replace(/<\|im_start\|>/g, '')
+      return marked(cleanAnswer)
+    })
 
     // 新增：登出方法
     const logout = async () => {
@@ -158,7 +183,13 @@ export default {
               try {
                 const data = JSON.parse(line.slice(6));
                 if (data.token) {
-                  streamingAnswer.value += data.token; // 实时追加
+                  // 过滤特殊标记
+                  let token = data.token
+                    .replace(/<\|im_end\|>/g, '')
+                    .replace(/<\|im_start\|>/g, '')
+                  if (token) {
+                    streamingAnswer.value += token; // 实时追加
+                  }
                 }
               } catch (e) {
                 console.warn('解析流数据失败:', e, line);
@@ -213,6 +244,7 @@ export default {
     return {
       question,
       answer,
+      streamingAnswer,  // 新增：返回streamingAnswer变量
       sources,
       loading,
       history,
@@ -221,7 +253,9 @@ export default {
       messageSuccess,
       logout,  // 新增：返回 logout 方法
       submitQuestion,
-      sendMessageToTeacher
+      sendMessageToTeacher,
+      renderedAnswer,
+      renderedStreamingAnswer
     }
   }
 }
@@ -411,5 +445,154 @@ h2 {
   content: '📄';
   position: absolute;
   left: 0;
+}
+
+/* Markdown渲染样式 */
+.markdown-body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif;
+  font-size: 16px;
+  line-height: 1.6;
+  color: #24292f;
+  word-wrap: break-word;
+}
+
+.markdown-body h1,
+.markdown-body h2,
+.markdown-body h3,
+.markdown-body h4,
+.markdown-body h5,
+.markdown-body h6 {
+  margin-top: 24px;
+  margin-bottom: 16px;
+  font-weight: 600;
+  line-height: 1.25;
+}
+
+.markdown-body h1 { font-size: 2em; border-bottom: 1px solid #d0d7de; padding-bottom: .3em; }
+.markdown-body h2 { font-size: 1.5em; border-bottom: 1px solid #d0d7de; padding-bottom: .3em; }
+.markdown-body h3 { font-size: 1.25em; }
+.markdown-body h4 { font-size: 1em; }
+
+.markdown-body p {
+  margin-top: 0;
+  margin-bottom: 16px;
+}
+
+.markdown-body code {
+  padding: .2em .4em;
+  margin: 0;
+  font-size: 85%;
+  white-space: break-spaces;
+  background-color: rgba(175,184,193,0.2);
+  border-radius: 6px;
+  font-family: ui-monospace, SFMono-Regular, SF Mono, Menlo, Consolas, Liberation Mono, monospace;
+}
+
+.markdown-body pre {
+  padding: 16px;
+  overflow: auto;
+  font-size: 85%;
+  line-height: 1.45;
+  background-color: #f6f8fa;
+  border-radius: 6px;
+  margin-top: 0;
+  margin-bottom: 16px;
+}
+
+.markdown-body pre code {
+  background-color: transparent;
+  padding: 0;
+}
+
+.markdown-body ul,
+.markdown-body ol {
+  margin-top: 0;
+  margin-bottom: 16px;
+  padding-left: 2em;
+}
+
+.markdown-body li {
+  margin-top: .25em;
+}
+
+.markdown-body blockquote {
+  margin: 0 0 16px;
+  padding: 0 1em;
+  color: #57606a;
+  border-left: .25em solid #d0d7de;
+}
+
+.markdown-body a {
+  color: #0969da;
+  text-decoration: none;
+}
+
+.markdown-body a:hover {
+  text-decoration: underline;
+}
+
+.markdown-body table {
+  border-spacing: 0;
+  border-collapse: collapse;
+  display: block;
+  width: max-content;
+  max-width: 100%;
+  overflow: auto;
+  margin-top: 0;
+  margin-bottom: 16px;
+}
+
+.markdown-body table tr {
+  background-color: #ffffff;
+  border-top: 1px solid hsla(210,18%,87%,1);
+}
+
+.markdown-body table th,
+.markdown-body table td {
+  padding: 6px 13px;
+  border: 1px solid #d0d7de;
+}
+
+.markdown-body table th {
+  font-weight: 600;
+  background-color: #f6f8fa;
+}
+
+.markdown-body img {
+  max-width: 100%;
+  box-sizing: content-box;
+  background-color: #ffffff;
+}
+
+.markdown-body hr {
+  height: .25em;
+  padding: 0;
+  margin: 24px 0;
+  background-color: #d0d7de;
+  border: 0;
+}
+
+.streaming-wrapper {
+  position: relative;
+  display: inline-block;
+  width: 100%;
+}
+
+.streaming-answer {
+  position: relative;
+  display: inline;
+}
+
+.streaming-cursor {
+  display: inline-block;
+  animation: blink 1s infinite;
+  font-weight: bold;
+  color: #667eea;
+  margin-left: 2px;
+}
+
+@keyframes blink {
+  0%, 50% { opacity: 1; }
+  51%, 100% { opacity: 0; }
 }
 </style>

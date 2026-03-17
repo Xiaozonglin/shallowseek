@@ -33,6 +33,14 @@ app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'dev_default_key')
 app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URL', 'sqlite:///app.db')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
+# Session Cookie 配置（关键：解决登出问题）
+app.config['SESSION_COOKIE_SECURE'] = False  # 开发环境设为False，生产环境应为True
+app.config['SESSION_COOKIE_HTTPONLY'] = True
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'  # 允许跨站请求携带cookie
+app.config['REMEMBER_COOKIE_SECURE'] = False
+app.config['REMEMBER_COOKIE_HTTPONLY'] = True
+app.config['REMEMBER_COOKIE_SAMESITE'] = 'Lax'
+
 # 邮件配置
 app.config['MAIL_SERVER'] = os.getenv('EMAIL_HOST')
 app.config['MAIL_PORT'] = int(os.getenv('EMAIL_PORT', 587))
@@ -236,11 +244,33 @@ def login():
     login_user(user)
     return flask.jsonify({"message": "Login successful", "role": user.role}), 200
 
+@app.route("/api/check-auth", methods=["GET"])
+def check_auth():
+    """检查用户登录状态"""
+    if current_user.is_authenticated:
+        return flask.jsonify({
+            "authenticated": True,
+            "user": {
+                "id": current_user.id,
+                "username": current_user.username,
+                "email": current_user.email,
+                "role": current_user.role
+            }
+        }), 200
+    else:
+        return flask.jsonify({"authenticated": False}), 401
+
 @app.route("/api/logout", methods=["POST"])
-@login_required
 def logout():
-    logout_user()
-    return flask.jsonify({"message": "Logout successful"}), 200
+    # 移除@login_required装饰器，允许任何用户调用登出
+    # 即使session已经过期，也应该允许用户登出
+    try:
+        logout_user()
+        return flask.jsonify({"message": "Logout successful"}), 200
+    except Exception as e:
+        # 即使登出失败，也返回成功，让前端可以跳转到登录页
+        print(f"Logout error: {e}")
+        return flask.jsonify({"message": "Logout successful"}), 200
 
 # ========================== 权威答案管理 (老师专属) ==========================
 
@@ -330,6 +360,11 @@ def qa():
 
         full_answer = ""
         for token in streamer:
+            # 过滤特殊标记
+            if '<|im_end|>' in token or '<|im_start|>' in token:
+                token = token.replace('<|im_end|>', '').replace('<|im_start|>', '')
+                if not token.strip():
+                    continue
             full_answer += token
             yield f"data: {json.dumps({'token': token})}\n\n"
         
@@ -338,7 +373,12 @@ def qa():
             db.session.add(new_record)
             db.session.commit()
 
-    return Response(stream_with_context(generate()), mimetype='text/event-stream')
+    # 禁用缓冲，确保实时传输
+    response = Response(stream_with_context(generate()), mimetype='text/event-stream')
+    response.headers['Cache-Control'] = 'no-cache'
+    response.headers['X-Accel-Buffering'] = 'no'
+    response.headers['Connection'] = 'keep-alive'
+    return response
 
 
 # ========================== 留言与邮件系统 ==========================

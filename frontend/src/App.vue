@@ -17,7 +17,7 @@
 </template>
 
 <script>
-import { computed } from 'vue'
+import { computed, ref, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import axios from 'axios'
 
@@ -30,6 +30,27 @@ export default {
     // 判断当前是否是登录页
     const isLoginPage = computed(() => route.path === '/login')
     
+    // 用户信息（从check-auth接口获取）
+    const user = ref(null)
+    
+    // 获取用户信息
+    const fetchUserInfo = async () => {
+      try {
+        const response = await axios.get('/api/check-auth')
+        if (response.data.authenticated) {
+          user.value = response.data.user
+        }
+      } catch (error) {
+        console.error('获取用户信息失败:', error)
+        user.value = null
+      }
+    }
+    
+    // 组件挂载时获取用户信息
+    onMounted(() => {
+      fetchUserInfo()
+    })
+    
     // 退出登录
     const handleLogout = async () => {
       try {
@@ -38,25 +59,28 @@ export default {
         
         if (response.status === 200 && response.data.message === 'Logout successful') {
           console.log('登出成功')
-          // 清除前端的用户状态（如果有的话）
-          // 例如：localStorage.removeItem('user')
+          // 清除用户信息
+          user.value = null
           
           // 跳转到登录页
           router.push('/login')
         } else {
           console.error('登出响应异常:', response.data)
           // 即使响应异常，也跳转到登录页
+          user.value = null
           router.push('/login')
         }
       } catch (error) {
         console.error('登出失败:', error)
         // 即使请求失败，也跳转到登录页（保证用户可以重新登录）
+        user.value = null
         router.push('/login')
       }
     }
     
     return {
       isLoginPage,
+      user,
       handleLogout
     }
   }
