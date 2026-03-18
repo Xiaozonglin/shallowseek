@@ -54,13 +54,26 @@ export default {
     // 退出登录
     const handleLogout = async () => {
       try {
-        await axios.post('/api/logout')
+        // 发送登出请求到后端
+        const response = await axios.post('/api/logout')
+        
+        if (response.status === 200 && response.data.message === 'Logout successful') {
+          console.log('登出成功')
+          // 清除用户信息
+          user.value = null
+          
+          // 跳转到登录页
+          router.push('/login')
+        } else {
+          console.error('登出响应异常:', response.data)
+          // 即使响应异常，也跳转到登录页
+          user.value = null
+          router.push('/login')
+        }
       } catch (error) {
-        console.error('登出请求失败，但仍执行本地清理:', error)
-      } finally {
-        // 确保执行：清除本地用户状态
+        console.error('登出失败:', error)
+        // 即使请求失败，也跳转到登录页（保证用户可以重新登录）
         user.value = null
-        // 跳转到登录页
         router.push('/login')
       }
     }
