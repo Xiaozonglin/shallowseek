@@ -5,7 +5,7 @@
 **Student Developers**
 - 肖宗林 (Zonglin Xiao) - [xiaozonglin@stu.xidian.edu.cn](mailto:xiaozonglin@stu.xidian.edu.cn)
 - 姚焱夫 (Yanfu Yao) - [YvesYao0209@foxmail.com](mailto:YvesYao0209@foxmail.com)
-- 孟子钦 (Ziqin Meng) - [email]
+- 孟子钦 (Ziqin Meng) - [3862834578@qq.com](mailto:3862834578@qq.com)
 
 **Supervisor**
 - 指导老师：XXX 教授 - [email] - Xidian University, School of XXX
@@ -75,8 +75,10 @@
 
 ### 前端
 
-前端文件位于`./frontend`文件夹下，在该文件夹中运行`npm install & npm run dev`即可运行，可以使用`npm build`构建生产环境的版本。
+前端文件位于`./frontend`文件夹下，在该文件夹中运行`npm install & npm run dev`即可运行，可以使用`npm run build`构建生产环境的版本。
 
 ### 后端
 
 后端文件位于`./backend`文件夹下，可使用 Anaconda / Miniconda 将项目根目录的`environment.yml`或通过`pip install -r requirements.txt`配置环境，随后可运行`cd backend & python main.py`代码来部署后端。
+
+关于环境的配置：Pytorch 的安装可能存在一些问题，请安装带有合适版本 cuda 支持的 Pytorch。后端会在运行时自动检查环境并选用对应的配置。

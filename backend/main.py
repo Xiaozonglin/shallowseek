@@ -8,9 +8,13 @@ from bs4 import BeautifulSoup
 from datetime import datetime
 from dotenv import load_dotenv
 
-# --- 核心：RTX 5060 兼容性与性能补丁 ---
-os.environ["CUDA_MODULE_LOADING"] = "LAZY"  # 延迟加载，防止初始化卡死
-os.environ["HF_ENDPOINT"] = "https://hf-mirror.com" # 镜像加速
+if torch.cuda.is_available():
+    os.environ["CUDA_MODULE_LOADING"] = "LAZY"
+    # 针对旧款显卡的显存优化
+    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+else:
+    # CPU 环境下限制线程数，防止 Flask 阻塞
+    torch.set_num_threads(os.cpu_count() // 2 if os.cpu_count() else 4)
 
 import flask
 from flask import Response, stream_with_context
@@ -62,6 +66,8 @@ class User(UserMixin, db.Model):
     email = db.Column(db.String(120), unique=True, nullable=False)
     password = db.Column(db.String(60), nullable=False)
     role = db.Column(db.String(10), nullable=False) # 'student' or 'teacher'
+    learning_summary = db.Column(db.String(1000), nullable=True) # AI生成的学习情况分析
+    summary_updated_at = db.Column(db.DateTime, nullable=True) # 分析更新时间
 
 class Question(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -89,6 +95,27 @@ class Message(db.Model):
 with app.app_context():
     db.create_all()
 
+# ========================== AI 模型运行环境检测 ==========================
+
+def get_optimal_hardware_config():
+    if torch.cuda.is_available():
+        device = "cuda"
+        # 检查显卡是否支持 bfloat16 (RTX 30/40/50系列支持，比 float16 更稳定)
+        if torch.cuda.get_device_capability()[0] >= 8:
+            dtype = torch.bfloat16
+            print(f"检测到现代 GPU: {torch.cuda.get_device_name(0)}，启用 bfloat16")
+        else:
+            dtype = torch.float16
+            print(f"检测到旧款 GPU: {torch.cuda.get_device_name(0)}，启用 float16")
+    else:
+        device = "cpu"
+        dtype = torch.float32 # CPU 通常不支持半精度运算，强行开启可能报错或变慢
+        print("未检测到 GPU，将切换至 CPU 模式（注意：推理速度将大幅下降）")
+    
+    return device, dtype
+
+DEVICE, DTYPE = get_optimal_hardware_config()
+
 # ========================== AI 模型初始化 ==========================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.abspath(os.path.join(BASE_DIR, "..", "model_weights"))
@@ -106,12 +133,15 @@ print("🚀 正在初始化 RTX 5060 加速引擎...")
 if not is_locally_available(MODEL_PATH):
     print("🌐 第一次运行：正在从镜像站拉取 Qwen 模型...")
     t_tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-1.5B-Instruct", trust_remote_code=True)
-    t_model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen2.5-1.5B-Instruct", torch_dtype=torch.float16, device_map="auto", trust_remote_code=True)
+    t_model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen2.5-1.5B-Instruct", torch_dtype=DTYPE, device_map="auto" if DEVICE == "cuda" else None, trust_remote_code=True)
     t_tokenizer.save_pretrained(MODEL_PATH)
     t_model.save_pretrained(MODEL_PATH)
 
 tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, local_files_only=True, trust_remote_code=True)
-model = AutoModelForCausalLM.from_pretrained(MODEL_PATH, torch_dtype=torch.float16, device_map="auto", local_files_only=True, trust_remote_code=True)
+model = AutoModelForCausalLM.from_pretrained(MODEL_PATH, torch_dtype=DTYPE, device_map="auto" if DEVICE == "cuda" else None, local_files_only=True, trust_remote_code=True, low_cpu_mem_usage=True,)
+
+if DEVICE == "cpu":
+        model = model.to("cpu")
 
 # 2. 加载 Embedding
 if not is_locally_available(EMBED_PATH):
@@ -121,7 +151,7 @@ if not is_locally_available(EMBED_PATH):
 
 embedding = HuggingFaceEmbeddings(
     model_name=EMBED_PATH, 
-    model_kwargs={'device': 'cuda'},
+    model_kwargs={'device': DEVICE},
     encode_kwargs={'normalize_embeddings': True}
 )
 
@@ -274,6 +304,144 @@ def logout():
 
 # ========================== 权威答案管理 (老师专属) ==========================
 
+@app.route("/api/questions/stats", methods=["GET"])
+@login_required
+def get_question_stats():
+    """获取问题统计数据"""
+    if current_user.role != 'teacher':
+        return flask.jsonify({"error": "Permission denied"}), 403
+    
+    # 获取所有问题
+    questions = Question.query.all()
+    
+    # 统计总提问数
+    total_questions = len(questions)
+    
+    # 按学生分组统计
+    questions_by_student = {}
+    student_summaries = {}
+    
+    for q in questions:
+        student = db.session.get(User, q.student_id)
+        if student:
+            if student.username not in questions_by_student:
+                questions_by_student[student.username] = []
+            questions_by_student[student.username].append({
+                "question": q.content,
+                "answer": q.answer
+            })
+    
+    # 为每个学生生成 AI 学习情况分析
+    for student_name, qa_list in questions_by_student.items():
+        # 查找学生用户
+        student_user = User.query.filter_by(username=student_name).first()
+        
+        # 检查是否需要更新分析（每24小时更新一次）
+        need_update = False
+        if student_user:
+            if not student_user.summary_updated_at:
+                need_update = True
+            elif (datetime.utcnow() - student_user.summary_updated_at).total_seconds() > 86400:  # 24小时
+                need_update = True
+        
+        # 如果有缓存且不需要更新，使用缓存
+        if student_user and student_user.learning_summary and not need_update:
+            student_summaries[student_name] = student_user.learning_summary
+            continue
+        
+        # 构建学生的学习内容
+        qa_text = "\n".join([
+            f"问题: {qa['question']}\n回答摘要: {qa['answer'][:100] if qa['answer'] else '无'}..."
+            for qa in qa_list[:5]  # 最多取5个问题
+        ])
+        
+        # 调用 AI 生成学习情况分析
+        prompt = f"""<|im_start|>system
+你是一位教育专家，请根据学生的提问记录，分析该学生的学习情况。请简要总结学生的学习兴趣、知识薄弱点和建议。回答要简洁，不超过100字。
+<|im_end|>
+<|im_start|>user
+学生 {student_name} 的提问记录如下：
+{qa_text}
+
+请分析该学生的学习情况。
+<|im_end|>
+<|im_start|>assistant
+"""
+        
+        try:
+            inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+            outputs = model.generate(
+                **inputs,
+                max_new_tokens=150,
+                temperature=0.7,
+                do_sample=True,
+                pad_token_id=tokenizer.eos_token_id
+            )
+            full_output = tokenizer.decode(outputs[0], skip_special_tokens=False)
+            
+            # 提取 assistant 的回复
+            summary = full_output
+            
+            # 方法1：找到最后一个 <|im_start|>assistant 之后的内容
+            if "<|im_start|>assistant" in full_output:
+                parts = full_output.split("<|im_start|>assistant")
+                if len(parts) > 1:
+                    summary = parts[-1]
+                    # 移除 <|im_end|> 标记
+                    if "<|im_end|>" in summary:
+                        summary = summary.split("<|im_end|>")[0]
+                    summary = summary.strip()
+            
+            # 方法2：如果方法1失败，尝试其他方式
+            if not summary or len(summary) < 10:
+                # 移除所有特殊标记后重新尝试
+                clean_output = full_output.replace('<|im_start|>', '').replace('<|im_end|>', '')
+                clean_output = clean_output.replace('', '')
+                
+                # 移除 system 和 user 部分
+                if "system" in clean_output:
+                    clean_output = clean_output.split("system")[0]
+                if "user" in clean_output:
+                    clean_output = clean_output.split("user")[0]
+                
+                # 提取 assistant 之后的内容
+                if "assistant" in clean_output:
+                    clean_output = clean_output.split("assistant")[-1]
+                
+                summary = clean_output.strip()
+            
+            # 方法3：如果还是失败，取最后一段有意义的文本
+            if not summary or len(summary) < 10:
+                lines = full_output.replace('<|im_start|>', '\n').replace('<|im_end|>', '\n')
+                lines = lines.split('\n')
+                for line in reversed(lines):
+                    line = line.strip()
+                    if line and len(line) > 10 and not line.startswith('<|') and 'system' not in line.lower() and 'user' not in line.lower():
+                        summary = line
+                        break
+            
+            student_summaries[student_name] = summary if summary and len(summary) >= 10 else f"该学生共提问 {len(qa_list)} 次"
+            
+            # 存储到数据库
+            if student_user:
+                student_user.learning_summary = student_summaries[student_name]
+                student_user.summary_updated_at = datetime.utcnow()
+                db.session.commit()
+                
+        except Exception as e:
+            print(f"生成学习情况分析失败: {e}")
+            student_summaries[student_name] = f"该学生共提问 {len(qa_list)} 次"
+    
+    # 生成总体 AI 总结
+    overall_summary = f"共有 {total_questions} 个问题，来自 {len(questions_by_student)} 位学生。"
+    
+    return flask.jsonify({
+        "total_questions": total_questions,
+        "questions_by_student": questions_by_student,
+        "student_summaries": student_summaries,
+        "summary": overall_summary
+    }), 200
+
 @app.route("/api/questions/pending", methods=["GET"])
 @login_required
 def get_pending_questions():
@@ -352,21 +520,24 @@ def qa():
     )
 
     def generate():
-        streamer = TextIteratorStreamer(tokenizer, skip_prompt=True, timeout=10)
-        inputs = tokenizer(full_prompt, return_tensors="pt").to(model.device)
+        streamer = TextIteratorStreamer(tokenizer, skip_prompt=True, timeout=60)
+        inputs = tokenizer(full_prompt, return_tensors="pt").to(DEVICE)
         generation_kwargs = dict(inputs, streamer=streamer, max_new_tokens=512, temperature=0.7, do_sample=True)
         thread = threading.Thread(target=model.generate, kwargs=generation_kwargs)
         thread.start()
 
         full_answer = ""
-        for token in streamer:
-            # 过滤特殊标记
-            if '<|im_end|>' in token or '<|im_start|>' in token:
-                token = token.replace('<|im_end|>', '').replace('<|im_start|>', '')
-                if not token.strip():
-                    continue
-            full_answer += token
-            yield f"data: {json.dumps({'token': token})}\n\n"
+        try:
+            for token in streamer:
+                # 过滤特殊标记
+                if '<|im_end|>' in token or '<|im_start|>' in token:
+                    token = token.replace('<|im_end|>', '').replace('<|im_start|>', '')
+                    if not token.strip():
+                        continue
+                full_answer += token
+                yield f"data: {json.dumps({'token': token})}\n\n"
+        except Exception as e:
+            print(f"Stream error: {e}")
         
         with app.app_context():
             new_record = Question(content=query, answer=full_answer.strip(), student_id=current_user.id)

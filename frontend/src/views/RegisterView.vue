@@ -1,169 +1,131 @@
 <template>
   <div class="register-container">
-    <div class="register-box">
-      <h2>注册新账户</h2>
-      
-      <form @submit.prevent="handleRegister">
-        <div class="form-group">
-          <label>用户名</label>
-          <input 
-            type="text" 
-            v-model="username" 
-            placeholder="请输入用户名"
-            required
-          >
-        </div>
+    <a-card title="注册新账户" class="register-card">
+      <a-form :model="form" @submit.prevent="handleRegister" layout="vertical">
+        <a-form-item label="用户名" :rules="[{ required: true, message: '请输入用户名' }]">
+          <a-input v-model:value="form.username" placeholder="请输入用户名" />
+        </a-form-item>
         
-        <div class="form-group">
-          <label>密码</label>
-          <input 
-            type="password" 
-            v-model="password" 
-            placeholder="请输入密码"
-            required
-          >
-        </div>
+        <a-form-item label="邮箱" :rules="[{ required: true, message: '请输入邮箱' }, { type: 'email', message: '请输入有效的邮箱地址' }]">
+          <a-input v-model:value="form.email" placeholder="请输入邮箱地址" />
+        </a-form-item>
         
-        <div class="form-group">
-          <label>确认密码</label>
-          <input 
-            type="password" 
-            v-model="confirmPassword" 
-            placeholder="请再次输入密码"
-            required
-          >
-        </div>
-
-        <div class="form-group">
-          <label>邮箱</label>
-          <input 
-            type="email"
-            v-model="email"
-            placeholder="请输入邮箱地址"
-            required
-          >
-        </div>
+        <a-form-item label="密码" :rules="[{ required: true, message: '请输入密码' }]">
+          <a-input-password v-model:value="form.password" placeholder="请输入密码" />
+        </a-form-item>
         
-        <div class="role-selector">
-          <label>注册身份</label>
-          <div class="role-options">
-            <label>
-              <input 
-                type="radio" 
-                v-model="role" 
-                value="student"
-                checked
-              > 学生
-            </label>
-            <label>
-              <input 
-                type="radio" 
-                v-model="role" 
-                value="teacher"
-              > 老师
-            </label>
+        <a-form-item label="确认密码" :rules="[{ required: true, message: '请再次输入密码' }]">
+          <a-input-password v-model:value="form.confirmPassword" placeholder="请再次输入密码" />
+        </a-form-item>
+        
+        <a-form-item label="注册身份" :rules="[{ required: true, message: '请选择角色' }]">
+          <div class="role-selector">
+            <a-radio-group v-model:value="form.role">
+              <a-radio-button value="student">学生</a-radio-button>
+              <a-radio-button value="teacher">老师</a-radio-button>
+            </a-radio-group>
           </div>
-        </div>
+        </a-form-item>
         
-        <div v-if="errorMessage" class="error-message">
-          {{ errorMessage }}
-        </div>
+        <!-- 错误信息显示 -->
+        <a-alert v-if="errorMessage" type="error" message="注册失败" :description="errorMessage" show-icon style="margin-bottom: 16px;" />
         
-        <div v-if="successMessage" class="success-message">
-          {{ successMessage }}
-        </div>
+        <!-- 成功信息显示 -->
+        <a-alert v-if="successMessage" type="success" message="注册成功" :description="successMessage" show-icon style="margin-bottom: 16px;" />
         
-        <button type="submit" class="register-btn" :disabled="loading">
-          {{ loading ? '注册中...' : '注册' }}
-        </button>
+        <a-form-item>
+          <a-button type="primary" html-type="submit" :loading="loading" block size="large">
+            {{ loading ? '注册中...' : '注册' }}
+          </a-button>
+        </a-form-item>
         
-        <p class="login-link">
-          已有账号？<a href="#" @click="goToLogin">立即登录</a>
-        </p>
-      </form>
-    </div>
+        <a-form-item>
+          <div class="login-link">
+            已有账号？<a href="#" @click="goToLogin">立即登录</a>
+          </div>
+        </a-form-item>
+      </a-form>
+    </a-card>
   </div>
 </template>
 
-<script>
-import { ref } from 'vue'
+<script setup>
+import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import axios from 'axios'
+import { Card, Form, Input, Button, Radio, Alert, Space, message } from 'ant-design-vue'
 
-export default {
-  name: 'RegisterView',
-  setup() {
-    const router = useRouter()
-    const username = ref('')
-    const email = ref('')
-    const password = ref('')
-    const confirmPassword = ref('')
-    const role = ref('student')
-    const errorMessage = ref('')
-    const successMessage = ref('')
-    const loading = ref(false)
-    
-    // 处理注册
-    const handleRegister = async () => {
-      // 验证密码
-      if (password.value !== confirmPassword.value) {
-        errorMessage.value = '两次输入的密码不一致'
-        return
-      }
-      
-      errorMessage.value = ''
-      successMessage.value = ''
-      loading.value = true
-      
-      try {
-        // 调用后端注册接口
-        const response = await axios.post('/api/register', {
-          username: username.value,
-          email: email.value,
-          password: password.value,
-          role: role.value
-        })
-        
-        // 注册成功
-        successMessage.value = '注册成功！正在跳转到登录页面...'
-        console.log('注册成功:', response.data)
-        
-        // 2秒后跳转到登录页面
-        setTimeout(() => {
-          router.push('/login')
-        }, 2000)
-        
-      } catch (error) {
-        // 处理错误
-        if (error.response) {
-          errorMessage.value = error.response.data.error || '注册失败'
-        } else {
-          errorMessage.value = '网络错误，请检查后端是否运行'
-        }
-        console.error('注册错误:', error)
-      } finally {
-        loading.value = false
+const router = useRouter()
+const form = ref({
+  username: '',
+  email: '',
+  password: '',
+  confirmPassword: '',
+  role: 'student'
+})
+const errorMessage = ref('')
+const successMessage = ref('')
+const loading = ref(false)
+
+const checkAuth = async () => {
+  try {
+    const response = await axios.get('/api/check-auth')
+    if (response.data.authenticated) {
+      const userRole = response.data.user.role
+      if (userRole === 'student') {
+        router.push('/student')
+      } else if (userRole === 'teacher') {
+        router.push('/teacher')
       }
     }
-    
-    // 跳转到登录页面
-    const goToLogin = () => {
-      router.push('/login')
-    }
-    
-    return {
-      username,
-      email,
-      password,
-      confirmPassword,
-      role,
-      errorMessage,
-      successMessage,
-      loading,
-      handleRegister,
-      goToLogin
-    }
+  } catch (error) {
+    console.error('检查登录状态失败:', error)
   }
+}
+
+onMounted(() => {
+  checkAuth()
+})
+
+const handleRegister = async () => {
+  if (form.value.password !== form.value.confirmPassword) {
+    errorMessage.value = '两次输入的密码不一致'
+    return
+  }
+  
+  errorMessage.value = ''
+  successMessage.value = ''
+  loading.value = true
+  
+  try {
+    const response = await axios.post('/api/register', {
+      username: form.value.username,
+      email: form.value.email,
+      password: form.value.password,
+      role: form.value.role
+    })
+    
+    successMessage.value = '注册成功！正在跳转到登录页面...'
+    message.success('注册成功')
+    
+    setTimeout(() => {
+      router.push('/login')
+    }, 2000)
+    
+  } catch (error) {
+    if (error.response) {
+      errorMessage.value = error.response.data.error || '注册失败'
+    } else {
+      errorMessage.value = '网络错误，请检查后端是否运行'
+    }
+    console.error('注册错误:', error)
+  } finally {
+    loading.value = false
+  }
+}
+
+const goToLogin = () => {
+  router.push('/login')
 }
 </script>
 
@@ -173,127 +135,195 @@ export default {
   justify-content: center;
   align-items: center;
   min-height: 100vh;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  background: #0a0a0a;
   padding: 20px;
 }
 
-.register-box {
-  background: white;
-  padding: 40px;
-  border-radius: 10px;
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+.register-card {
   width: 100%;
-  max-width: 400px;
+  max-width: 420px;
+  border-radius: 16px;
+  border: 2px solid rgba(255, 255, 255, 0.2);
 }
 
-h2 {
+.register-card :deep(.ant-card-head) {
   text-align: center;
-  color: #333;
-  margin-bottom: 30px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
 }
 
-.form-group {
-  margin-bottom: 20px;
+.register-card :deep(.ant-card-head-title) {
+  font-size: 20px;
+  font-weight: 600;
+  color: #fff;
 }
 
-.form-group label {
-  display: block;
-  margin-bottom: 8px;
-  color: #555;
-  font-weight: 500;
+.register-card :deep(.ant-card-body) {
+  color: #e0e0e0;
 }
 
-.form-group input {
-  width: 100%;
-  padding: 12px 15px;
-  border: 2px solid #ddd;
-  border-radius: 6px;
+.register-card :deep(.ant-form-item-label > label) {
+  color: #a0a0a0;
+  font-size: 14px;
+}
+
+.register-card :deep(.ant-input),
+.register-card :deep(.ant-input-password .ant-input),
+.register-card :deep(.ant-input-affix-wrapper) {
+  background: #1a1a1a !important;
+  border: 2px solid rgba(255, 255, 255, 0.3) !important;
+  color: #fff !important;
+  border-radius: 8px;
+  font-size: 15px;
+  -webkit-text-fill-color: #fff !important;
+  -webkit-box-shadow: 0 0 0 1000px #1a1a1a inset !important;
+  box-shadow: 0 0 0 1000px #1a1a1a inset !important;
+}
+
+.register-card :deep(.ant-input::placeholder),
+.register-card :deep(.ant-input-password .ant-input::placeholder) {
+  color: #666 !important;
+}
+
+.register-card :deep(.ant-input:focus),
+.register-card :deep(.ant-input-focused),
+.register-card :deep(.ant-input-affix-wrapper:focus),
+.register-card :deep(.ant-input-affix-wrapper-focused) {
+  background: #1a1a1a !important;
+  border-color: #fff !important;
+  box-shadow: 0 0 0 1000px #1a1a1a inset !important;
+}
+
+.register-card :deep(.ant-input-affix-wrapper:hover),
+.register-card :deep(.ant-input:hover) {
+  border-color: rgba(255, 255, 255, 0.5) !important;
+}
+
+.register-card :deep(.ant-input-password-icon) {
+  color: #888;
+}
+
+.register-card :deep(.ant-input-password-icon:hover) {
+  color: #fff;
+}
+
+.register-card :deep(.ant-btn-primary) {
+  background: #fff;
+  border: 2px solid #fff;
+  color: #0a0a0a;
+  border-radius: 8px;
+  font-weight: 600;
   font-size: 16px;
-  transition: border-color 0.3s;
-  box-sizing: border-box;
+  height: 44px;
 }
 
-.form-group input:focus {
-  outline: none;
-  border-color: #667eea;
+.register-card :deep(.ant-btn-primary:hover),
+.register-card :deep(.ant-btn-primary:focus) {
+  background: #e0e0e0;
+  border-color: #e0e0e0;
+  color: #0a0a0a;
+}
+
+.register-card :deep(.ant-btn-primary:disabled) {
+  background: #333;
+  border-color: #333;
+  color: #666;
 }
 
 .role-selector {
-  margin-bottom: 20px;
-}
-
-.role-selector label {
-  display: block;
-  margin-bottom: 8px;
-  color: #555;
-  font-weight: 500;
-}
-
-.role-options {
   display: flex;
-  gap: 20px;
+  justify-content: center;
 }
 
-.role-options label {
+.role-selector :deep(.ant-radio-group) {
   display: flex;
-  align-items: center;
-  gap: 5px;
-  cursor: pointer;
+  gap: 16px;
 }
 
-.error-message {
-  color: #e74c3c;
-  background: #ffeaea;
-  padding: 10px;
-  border-radius: 5px;
-  margin-bottom: 20px;
-  font-size: 14px;
+.role-selector :deep(.ant-radio-button-wrapper) {
+  flex: 1;
+  text-align: center;
+  padding: 12px 24px;
+  height: auto;
+  background: transparent;
+  border: 2px solid rgba(255, 255, 255, 0.3);
+  color: #a0a0a0;
+  border-radius: 8px;
 }
 
-.success-message {
-  color: #28a745;
-  background: #e8f5e9;
-  padding: 10px;
-  border-radius: 5px;
-  margin-bottom: 20px;
-  font-size: 14px;
+.role-selector :deep(.ant-radio-button-wrapper:first-child),
+.role-selector :deep(.ant-radio-button-wrapper:last-child) {
+  border-radius: 8px;
 }
 
-.register-btn {
-  width: 100%;
-  padding: 14px;
-  background: linear-gradient(135deg, #28a745 0%, #20c997 100%);
-  color: white;
-  border: none;
-  border-radius: 6px;
-  font-size: 16px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: transform 0.2s;
+.role-selector :deep(.ant-radio-button-wrapper:hover) {
+  color: #fff;
+  border-color: rgba(255, 255, 255, 0.5);
 }
 
-.register-btn:hover:not(:disabled) {
-  transform: translateY(-2px);
+.role-selector :deep(.ant-radio-button-wrapper-checked) {
+  background: #fff;
+  border-color: #fff;
+  color: #0a0a0a;
 }
 
-.register-btn:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
+.register-card :deep(.ant-alert-error) {
+  background: rgba(255, 77, 79, 0.15);
+  border: 1px solid rgba(255, 77, 79, 0.4);
+}
+
+.register-card :deep(.ant-alert-error .ant-alert-message) {
+  color: #ff7875;
+}
+
+.register-card :deep(.ant-alert-error .ant-alert-description) {
+  color: #ffa39e;
+}
+
+.register-card :deep(.ant-alert-error .ant-alert-icon) {
+  color: #ff7875;
+}
+
+.register-card :deep(.ant-alert-success) {
+  background: rgba(82, 196, 26, 0.15);
+  border: 1px solid rgba(82, 196, 26, 0.4);
+}
+
+.register-card :deep(.ant-alert-success .ant-alert-message) {
+  color: #73d13d;
+}
+
+.register-card :deep(.ant-alert-success .ant-alert-description) {
+  color: #95de64;
+}
+
+.register-card :deep(.ant-alert-success .ant-alert-icon) {
+  color: #73d13d;
 }
 
 .login-link {
   text-align: center;
-  margin-top: 20px;
-  color: #666;
+  margin-top: 16px;
+  color: #888;
 }
 
 .login-link a {
-  color: #667eea;
+  color: #fff;
   text-decoration: none;
   font-weight: 500;
+  margin-left: 4px;
 }
 
 .login-link a:hover {
   text-decoration: underline;
+}
+
+@media (max-width: 480px) {
+  .register-container {
+    padding: 16px;
+  }
+  
+  .register-card {
+    border-radius: 12px;
+  }
 }
 </style>

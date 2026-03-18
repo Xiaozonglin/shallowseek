@@ -1,88 +1,76 @@
 <template>
-  <div id="app">
+  <a-layout class="app-layout">
     <!-- 导航栏 -->
-    <nav v-if="!isLoginPage">
-      <div class="nav-container">
-        <div class="nav-brand">学习助手</div>
-        <div class="nav-user" v-if="user">
-          欢迎，{{ user.username }}
-          <button @click="handleLogout" class="logout-btn">退出</button>
-        </div>
+    <a-layout-header v-if="!isLoginPage" class="app-header">
+      <div class="container">
+        <a-space size="middle" style="width: 100%; display: flex; justify-content: space-between; align-items: center;">
+          <a href="#" class="logo">
+            学习助手
+          </a>
+          <a-space v-if="user" size="middle" class="user-info">
+            <span>欢迎，{{ user.username }}</span>
+            <a-button class="logout-btn" @click="handleLogout">
+              退出
+            </a-button>
+          </a-space>
+        </a-space>
       </div>
-    </nav>
+    </a-layout-header>
     
     <!-- 页面内容 -->
-    <router-view />
-  </div>
+    <a-layout-content class="app-content">
+      <div class="container">
+        <router-view />
+      </div>
+    </a-layout-content>
+  </a-layout>
 </template>
 
-<script>
+<script setup>
 import { computed, ref, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import axios from 'axios'
+import { Layout, Menu, Button, Space } from 'ant-design-vue'
 
-export default {
-  name: 'App',
-  setup() {
-    const route = useRoute()
-    const router = useRouter()
-    
-    // 判断当前是否是登录页
-    const isLoginPage = computed(() => route.path === '/login')
-    
-    // 用户信息（从check-auth接口获取）
-    const user = ref(null)
-    
-    // 获取用户信息
-    const fetchUserInfo = async () => {
-      try {
-        const response = await axios.get('/api/check-auth')
-        if (response.data.authenticated) {
-          user.value = response.data.user
-        }
-      } catch (error) {
-        console.error('获取用户信息失败:', error)
-        user.value = null
-      }
+const { Header, Content, Footer, Sider } = Layout
+const route = useRoute()
+const router = useRouter()
+
+const isLoginPage = computed(() => route.path === '/login')
+const user = ref(null)
+
+const fetchUserInfo = async () => {
+  try {
+    const response = await axios.get('/api/check-auth')
+    if (response.data.authenticated) {
+      user.value = response.data.user
     }
-    
-    // 组件挂载时获取用户信息
-    onMounted(() => {
-      fetchUserInfo()
-    })
-    
-    // 退出登录
-    const handleLogout = async () => {
-      try {
-        // 发送登出请求到后端
-        const response = await axios.post('/api/logout')
-        
-        if (response.status === 200 && response.data.message === 'Logout successful') {
-          console.log('登出成功')
-          // 清除用户信息
-          user.value = null
-          
-          // 跳转到登录页
-          router.push('/login')
-        } else {
-          console.error('登出响应异常:', response.data)
-          // 即使响应异常，也跳转到登录页
-          user.value = null
-          router.push('/login')
-        }
-      } catch (error) {
-        console.error('登出失败:', error)
-        // 即使请求失败，也跳转到登录页（保证用户可以重新登录）
-        user.value = null
-        router.push('/login')
-      }
+  } catch (error) {
+    console.error('获取用户信息失败:', error)
+    user.value = null
+  }
+}
+
+onMounted(() => {
+  fetchUserInfo()
+})
+
+const handleLogout = async () => {
+  try {
+    const response = await axios.post('/api/logout')
+    if (response.status === 200 && response.data.message === 'Logout successful') {
+      console.log('登出成功')
+      user.value = null
+      router.push('/login')
+    } else {
+      console.error('登出响应异常:', response.data)
+      user.value = null
+      router.push('/login')
     }
-    
-    return {
-      isLoginPage,
-      user,
-      handleLogout
-    }
+  } catch (error) {
+    console.error('登出失败:', error)
+    user.value = null
+    router.push('/login')
   }
 }
 </script>
@@ -99,47 +87,309 @@ body {
     'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
     sans-serif;
   -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoasing: grayscale;
+  -moz-osx-font-smoothing: grayscale;
+  background: #0a0a0a;
+  color: #e0e0e0;
 }
 
-nav {
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-  color: white;
-  padding: 0 20px;
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
-}
-
-.nav-container {
-  max-width: 1200px;
+.container {
+  max-width: 1400px;
   margin: 0 auto;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  height: 60px;
+  padding: 0 24px;
+  width: 100%;
 }
 
-.nav-brand {
-  font-size: 24px;
-  font-weight: bold;
+.app-layout {
+  min-height: 100vh;
+  background: #0a0a0a;
 }
 
-.nav-user {
-  display: flex;
-  align-items: center;
-  gap: 15px;
+.app-header {
+  background: #0a0a0a;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  height: 64px;
+  line-height: 64px;
+  padding: 0;
+}
+
+.logo {
+  color: #fff;
+  font-size: 22px;
+  font-weight: 600;
+  text-decoration: none;
+  letter-spacing: 0.5px;
+}
+
+.user-info {
+  color: #a0a0a0;
+}
+
+.user-info span {
+  color: #a0a0a0;
+  font-size: 14px;
 }
 
 .logout-btn {
-  background: rgba(255, 255, 255, 0.2);
-  color: white;
-  border: 1px solid rgba(255, 255, 255, 0.3);
-  padding: 5px 15px;
-  border-radius: 4px;
-  cursor: pointer;
-  transition: background 0.3s;
+  background: transparent;
+  border: 2px solid rgba(255, 255, 255, 0.5);
+  color: #fff;
+  border-radius: 6px;
+  padding: 6px 20px;
+  font-size: 14px;
+  font-weight: 500;
+  transition: all 0.2s ease;
 }
 
 .logout-btn:hover {
-  background: rgba(255, 255, 255, 0.3);
+  background: rgba(255, 255, 255, 0.1);
+  border-color: #fff;
+  color: #fff;
+}
+
+.app-content {
+  min-height: calc(100vh - 64px);
+  padding: 24px;
+  background: #0a0a0a;
+}
+
+/* Ant Design Vue 暗色主题覆盖 */
+.ant-card {
+  background: #141414;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 12px;
+}
+
+.ant-card-head {
+  background: transparent;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  color: #fff;
+}
+
+.ant-card-head-title {
+  color: #fff;
+}
+
+.ant-card-body {
+  color: #e0e0e0;
+}
+
+.ant-input,
+.ant-input-password,
+.ant-textarea {
+  background: #1a1a1a;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  color: #fff;
+  border-radius: 8px;
+}
+
+.ant-input:focus,
+.ant-input-focused,
+.ant-textarea:focus,
+.ant-textarea-focused {
+  background: #1a1a1a;
+  border-color: #fff;
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.1);
+}
+
+.ant-input::placeholder,
+.ant-textarea::placeholder {
+  color: #666;
+}
+
+.ant-btn-primary {
+  background: #fff;
+  border-color: #fff;
+  color: #0a0a0a;
+  border-radius: 8px;
+  font-weight: 500;
+}
+
+.ant-btn-primary:hover,
+.ant-btn-primary:focus {
+  background: #e0e0e0;
+  border-color: #e0e0e0;
+  color: #0a0a0a;
+}
+
+.ant-btn-primary:disabled {
+  background: #333;
+  border-color: #333;
+  color: #666;
+}
+
+.ant-btn {
+  border-radius: 8px;
+}
+
+.ant-btn-dangerous {
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  color: #ff4d4f;
+}
+
+.ant-btn-dangerous:hover {
+  background: rgba(255, 77, 79, 0.1);
+  border-color: #ff4d4f;
+}
+
+.ant-form-item-label > label {
+  color: #a0a0a0;
+}
+
+.ant-divider {
+  border-color: rgba(255, 255, 255, 0.1);
+}
+
+.ant-divider-inner-text {
+  color: #a0a0a0;
+}
+
+.ant-list-item {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.ant-list-item-meta-title {
+  color: #fff !important;
+}
+
+.ant-list-item-meta-description {
+  color: #888 !important;
+}
+
+.ant-list-item-meta-content {
+  color: #e0e0e0;
+}
+
+.ant-list-item-meta-avatar {
+  color: #888;
+}
+
+.ant-list-item-action {
+  color: #888;
+}
+
+.ant-list-item-action > li {
+  color: #888;
+}
+
+.ant-collapse {
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+}
+
+.ant-collapse-item {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.ant-collapse-header {
+  background: #141414 !important;
+  color: #fff !important;
+}
+
+.ant-collapse-content {
+  background: #0f0f0f !important;
+  color: #e0e0e0 !important;
+}
+
+.ant-collapse-arrow {
+  color: #888;
+}
+
+.ant-empty-description {
+  color: #666;
+}
+
+.ant-alert {
+  border-radius: 8px;
+}
+
+.ant-alert-success {
+  background: rgba(82, 196, 26, 0.1);
+  border: 1px solid rgba(82, 196, 26, 0.3);
+}
+
+.ant-alert-error {
+  background: rgba(255, 77, 79, 0.1);
+  border: 1px solid rgba(255, 77, 79, 0.3);
+}
+
+.ant-spin-text {
+  color: #888;
+}
+
+.ant-statistic-title {
+  color: #888 !important;
+}
+
+.ant-statistic-content {
+  color: #fff !important;
+}
+
+.ant-statistic-content-value {
+  color: #fff !important;
+}
+
+.ant-tag {
+  border-radius: 4px;
+}
+
+.ant-radio-button-wrapper {
+  background: #1a1a1a;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  color: #a0a0a0;
+}
+
+.ant-radio-button-wrapper:hover {
+  color: #fff;
+}
+
+.ant-radio-button-wrapper-checked {
+  background: #fff;
+  border-color: #fff;
+  color: #0a0a0a;
+}
+
+.ant-radio-button-wrapper:first-child {
+  border-radius: 8px 0 0 8px;
+}
+
+.ant-radio-button-wrapper:last-child {
+  border-radius: 0 8px 8px 0;
+}
+
+.ant-page-header {
+  color: #fff;
+}
+
+.ant-page-header-heading-title {
+  color: #fff;
+}
+
+.ant-page-header-heading-sub-title {
+  color: #888;
+}
+
+.ant-layout-header {
+  background: #0a0a0a !important;
+}
+
+.ant-layout-content {
+  background: #0a0a0a !important;
+}
+
+/* 响应式设计 */
+@media (max-width: 768px) {
+  .container {
+    padding: 0 16px;
+  }
+  
+  .logo {
+    font-size: 18px;
+  }
+  
+  .app-content {
+    padding: 16px;
+  }
 }
 </style>

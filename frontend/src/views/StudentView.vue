@@ -1,137 +1,213 @@
 <template>
-  <div class="student-container">
-    <!-- 添加一个学生页面的登出按钮（可选） -->
-    <div class="student-header">
-      <h1>学生工作台</h1>
-      <button @click="logout" class="student-logout-btn">退出登录</button>
-    </div>
+  <a-layout class="student-container">
+    <a-layout-content>
+      <a-row :gutter="[16, 16]" style="padding: 24px;">
+        <!-- 左侧：提问区域 -->
+        <a-col :xs="24" :md="16">
+          <a-card title="向AI提问" class="qa-section">
+            <a-form layout="vertical">
+              <a-form-item>
+                <a-textarea
+                  v-model:value="question"
+                  placeholder="请输入您的问题，例如：什么是加法？"
+                  :rows="4"
+                />
+              </a-form-item>
+              <a-form-item>
+                <a-button 
+                  type="primary" 
+                  block
+                  @click="submitQuestion" 
+                  :disabled="!question.trim() || loading"
+                  :loading="loading"
+                >
+                  {{ loading ? '思考中...' : '提问' }}
+                </a-button>
+              </a-form-item>
+            </a-form>
 
-    <div class="main-content">
-      <!-- 左侧：提问区域 -->
-      <div class="qa-section">
-        <h2>向AI提问</h2>
-        <div class="input-area">
-          <textarea 
-            v-model="question" 
-            placeholder="请输入您的问题，例如：什么是加法？"
-            rows="4"
-          ></textarea>
-          <button 
-            @click="submitQuestion" 
-            :disabled="!question.trim() || loading"
-            class="ask-btn"
-          >
-            {{ loading ? '思考中...' : '提问' }}
-          </button>
-        </div>
-
-        <!-- 答案显示区域 -->
-        <div v-if="streamingAnswer || answer" class="answer-section">
-          <h3>AI答案：</h3>
-          <!-- 流式回答实时显示 -->
-          <div v-if="streamingAnswer" class="streaming-wrapper">
-            <div class="streaming-answer markdown-body" v-html="renderedStreamingAnswer"></div>
-            <span class="streaming-cursor">█</span>
-          </div>
-          <!-- 静态答案显示 -->
-          <div v-if="!streamingAnswer && answer" class="answer-content markdown-body" v-html="renderedAnswer">
-          </div>
-          
-          <!-- 新增：答案来源展示 -->
-          <div v-if="sources && sources.length > 0" class="sources-section">
-            <h4>📚 答案参考来源：</h4>
-            <ul class="sources-list">
-              <li v-for="(source, index) in sources" :key="index">
-                {{ source }}
-              </li>
-            </ul>
-          </div>
-          
-          <div class="answer-meta">
-            <small>本次回答基于文档检索生成</small>
-          </div>
-        </div>
-
-        <!-- 历史问题 -->
-        <div v-if="history.length > 0" class="history-section">
-          <h3>提问历史</h3>
-          <div class="history-list">
-            <div v-for="(item, index) in history" :key="index" class="history-item">
-              <div class="history-question"><strong>Q:</strong> {{ item.question }}</div>
-              <div class="history-answer"><strong>A:</strong> {{ item.answer }}</div>
+            <!-- 答案显示区域 -->
+            <div v-if="streamingAnswer || answer" class="answer-section">
+              <a-divider orientation="left">AI答案</a-divider>
+              <!-- 流式回答实时显示 -->
+              <a-card v-if="streamingAnswer" class="streaming-card">
+                <div class="streaming-wrapper">
+                  <div class="streaming-answer markdown-body" v-html="renderedStreamingAnswer"></div>
+                  <span class="streaming-cursor">█</span>
+                </div>
+              </a-card>
+              <!-- 静态答案显示 -->
+              <a-card v-else-if="!streamingAnswer && answer" class="answer-card">
+                <div class="answer-content markdown-body" v-html="renderedAnswer">
+                </div>
+                
+                <!-- 新增：答案来源展示 -->
+                <div v-if="sources && sources.length > 0" class="sources-section">
+                  <a-divider orientation="left">📚 答案参考来源</a-divider>
+                  <a-list
+                    item-layout="horizontal"
+                    :data-source="sources"
+                  >
+                    <template #renderItem="{ item }">
+                      <a-list-item>
+                        <a-list-item-meta
+                          avatar="📄"
+                          title="{{ item }}"
+                        />
+                      </a-list-item>
+                    </template>
+                  </a-list>
+                </div>
+                
+                <div class="answer-meta">
+                  <a-tag color="blue">本次回答基于文档检索生成</a-tag>
+                </div>
+              </a-card>
             </div>
-          </div>
-        </div>
-      </div>
 
-      <!-- 右侧：留言给老师 -->
-      <div class="message-section">
-        <h2>给老师留言</h2>
-        <div class="message-input">
-          <textarea 
-            v-model="messageToTeacher" 
-            placeholder="有什么问题需要老师协助吗？"
-            rows="3"
-          ></textarea>
-          <button 
-            @click="sendMessageToTeacher" 
-            :disabled="!messageToTeacher.trim() || sendingMessage"
-            class="message-btn"
-          >
-            {{ sendingMessage ? '发送中...' : '发送留言' }}
-          </button>
-        </div>
-        <div v-if="messageSuccess" class="success-message">
-          留言已发送！老师会收到邮件通知。
-        </div>
-      </div>
-    </div>
-  </div>
+            <!-- 历史问题 -->
+            <div v-if="history.length > 0" class="history-section">
+              <a-divider orientation="left">提问历史</a-divider>
+              <a-list
+                item-layout="vertical"
+                :data-source="history"
+              >
+                <template #renderItem="{ item, index }">
+                  <a-list-item :key="index">
+                    <a-list-item-meta
+                      :title="`<strong>Q:</strong> ${item.question}`"
+                      :description="`<strong>A:</strong> ${item.answer}`"
+                    />
+                  </a-list-item>
+                </template>
+              </a-list>
+            </div>
+          </a-card>
+        </a-col>
+
+        <!-- 右侧：留言给老师 -->
+        <a-col :xs="24" :md="8">
+          <a-card title="给老师留言" class="message-section">
+            <a-form layout="vertical">
+              <a-form-item>
+                <a-textarea
+                  v-model:value="messageToTeacher"
+                  placeholder="有什么问题需要老师协助吗？"
+                  :rows="3"
+                />
+              </a-form-item>
+              <a-form-item>
+                <a-button 
+                  type="primary" 
+                  block
+                  @click="sendMessageToTeacher" 
+                  :disabled="!messageToTeacher.trim() || sendingMessage"
+                  :loading="sendingMessage"
+                >
+                  {{ sendingMessage ? '发送中...' : '发送留言' }}
+                </a-button>
+              </a-form-item>
+            </a-form>
+            <a-alert 
+              v-if="messageSuccess" 
+              type="success" 
+              message="留言已发送！" 
+              description="老师会收到邮件通知。"
+              show-icon
+            />
+          </a-card>
+        </a-col>
+      </a-row>
+    </a-layout-content>
+  </a-layout>
 </template>
 
 <script>
 import { ref, onMounted, computed } from 'vue'
-import { useRouter } from 'vue-router'  // 新增：导入 useRouter
+import { useRouter } from 'vue-router'
 import axios from 'axios'
 import { marked } from 'marked'
+import katex from 'katex'
+import 'katex/dist/katex.min.css'
 
 export default {
   name: 'StudentView',
   setup() {
-    const router = useRouter()  // 新增：获取路由实例
+    const router = useRouter()
     const question = ref('');
     const answer = ref('');
     const streamingAnswer = ref('');
-    const sources = ref([]);
     const loading = ref(false);
+    const sources = ref([]);
     const history = ref([]);
     const messageToTeacher = ref('');
     const sendingMessage = ref(false);
     const messageSuccess = ref(false);
 
-    // 配置marked选项
     marked.setOptions({
-      breaks: true, // 支持换行
-      gfm: true // 支持GitHub风格的Markdown
+      breaks: true,
+      gfm: true
     })
 
-    // 计算属性：将markdown转换为HTML
+    const renderLatex = (text) => {
+      if (!text) return ''
+      let result = text
+      
+      // 处理 \[...\] 格式的行间公式
+      result = result.replace(/\\\[([\s\S]+?)\\\]/g, (match, latex) => {
+        try {
+          return katex.renderToString(latex.trim(), { displayMode: true, throwOnError: false })
+        } catch (e) {
+          return match
+        }
+      })
+      
+      // 处理 $$...$$ 格式的行间公式
+      result = result.replace(/\$\$([\s\S]+?)\$\$/g, (match, latex) => {
+        try {
+          return katex.renderToString(latex.trim(), { displayMode: true, throwOnError: false })
+        } catch (e) {
+          return match
+        }
+      })
+      
+      // 处理 \(...\) 格式的行内公式
+      result = result.replace(/\\\(([^)]+?)\\\)/g, (match, latex) => {
+        try {
+          return katex.renderToString(latex.trim(), { displayMode: false, throwOnError: false })
+        } catch (e) {
+          return match
+        }
+      })
+      
+      // 处理 $...$ 格式的行内公式
+      result = result.replace(/\$([^\$\n]+?)\$/g, (match, latex) => {
+        try {
+          return katex.renderToString(latex.trim(), { displayMode: false, throwOnError: false })
+        } catch (e) {
+          return match
+        }
+      })
+      
+      return result
+    }
+
     const renderedAnswer = computed(() => {
       if (!answer.value) return ''
-      // 过滤特殊标记
       let cleanAnswer = answer.value
         .replace(/<\|im_end\|>/g, '')
         .replace(/<\|im_start\|>/g, '')
-      return marked(cleanAnswer)
+      const withLatex = renderLatex(cleanAnswer)
+      return marked(withLatex)
     })
 
     const renderedStreamingAnswer = computed(() => {
       if (!streamingAnswer.value) return ''
-      // 过滤特殊标记
       let cleanAnswer = streamingAnswer.value
         .replace(/<\|im_end\|>/g, '')
         .replace(/<\|im_start\|>/g, '')
-      return marked(cleanAnswer)
+      const withLatex = renderLatex(cleanAnswer)
+      return marked(withLatex)
     })
 
     // 新增：登出方法
@@ -262,197 +338,82 @@ export default {
 </script>
 
 <style scoped>
-/* 新增样式：学生头部区域和登出按钮 */
-.student-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 30px;
-  padding-bottom: 15px;
-  border-bottom: 2px solid #667eea;
-}
-
-.student-header h1 {
-  color: #333;
-  margin: 0;
-}
-
-.student-logout-btn {
-  padding: 8px 20px;
-  background: linear-gradient(135deg, #e74c3c 0%, #c0392b 100%);
-  color: white;
-  border: none;
-  border-radius: 6px;
-  font-size: 16px;
-  cursor: pointer;
-  transition: transform 0.2s;
-}
-
-.student-logout-btn:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 4px 12px rgba(231, 76, 60, 0.4);
-}
-
 .student-container {
-  padding: 30px;
-  max-width: 1200px;
-  margin: 0 auto;
+  min-height: 100vh;
+  background: #0a0a0a;
 }
 
-.main-content {
-  display: grid;
-  grid-template-columns: 2fr 1fr;
-  gap: 30px;
+.qa-section,
+.message-section {
+  margin-bottom: 24px;
 }
 
-.qa-section, .message-section {
-  background: white;
-  padding: 25px;
-  border-radius: 10px;
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.08);
-}
-
-h2 {
-  color: #333;
-  margin-bottom: 20px;
-  padding-bottom: 10px;
-  border-bottom: 2px solid #667eea;
-}
-
-.input-area textarea, .message-input textarea {
+.streaming-wrapper {
+  position: relative;
+  display: inline-block;
   width: 100%;
-  padding: 15px;
-  border: 2px solid #e1e5e9;
-  border-radius: 8px;
-  font-size: 16px;
-  resize: vertical;
-  box-sizing: border-box;
-  margin-bottom: 15px;
 }
 
-.input-area textarea:focus, .message-input textarea:focus {
-  outline: none;
-  border-color: #667eea;
+.streaming-answer {
+  position: relative;
+  display: inline;
 }
 
-.ask-btn, .message-btn {
-  width: 100%;
-  padding: 12px;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-  color: white;
-  border: none;
-  border-radius: 6px;
-  font-size: 16px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: all 0.3s;
+.streaming-cursor {
+  display: inline-block;
+  animation: blink 1s infinite;
+  font-weight: bold;
+  color: #fff;
+  margin-left: 2px;
 }
 
-.ask-btn:hover:not(:disabled), .message-btn:hover:not(:disabled) {
-  transform: translateY(-2px);
-  box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
-}
-
-.ask-btn:disabled, .message-btn:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
+@keyframes blink {
+  0%, 50% { opacity: 1; }
+  51%, 100% { opacity: 0; }
 }
 
 .answer-section {
-  margin-top: 30px;
-  padding: 20px;
-  background: #f8f9fa;
-  border-radius: 8px;
-  border-left: 4px solid #28a745;
+  margin-top: 24px;
+}
+
+.answer-card {
+  background: #1a1a1a;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.streaming-card {
+  background: #1a1a1a;
+  border: 1px solid rgba(255, 255, 255, 0.1);
 }
 
 .answer-content {
-  font-size: 16px;
-  line-height: 1.6;
-  color: #333;
-  margin: 10px 0;
-}
-
-.answer-meta {
-  text-align: right;
-  color: #6c757d;
-  font-size: 14px;
-}
-
-.history-section {
-  margin-top: 30px;
-}
-
-.history-list {
-  max-height: 300px;
-  overflow-y: auto;
-}
-
-.history-item {
-  padding: 15px;
-  margin-bottom: 15px;
-  background: white;
-  border: 1px solid #e9ecef;
-  border-radius: 6px;
-}
-
-.history-question {
-  color: #0066cc;
-  margin-bottom: 8px;
-}
-
-.history-answer {
-  color: #333;
-  font-size: 15px;
-}
-
-.success-message {
-  margin-top: 15px;
-  padding: 10px;
-  background: #d4edda;
-  color: #155724;
-  border-radius: 4px;
-  text-align: center;
+  padding: 16px;
+  background: #141414;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
 }
 
 .sources-section {
   margin-top: 20px;
-  padding-top: 15px;
-  border-top: 1px dashed #eee;
+  padding-top: 16px;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
 }
 
-.sources-section h4 {
-  font-size: 14px;
-  color: #666;
-  margin-bottom: 8px;
+.answer-meta {
+  margin-top: 16px;
+  text-align: right;
 }
 
-.sources-list {
-  list-style-type: none;
-  padding-left: 0;
-  font-size: 13px;
-  color: #888;
+.history-section {
+  margin-top: 24px;
 }
 
-.sources-list li {
-  padding: 4px 0;
-  padding-left: 20px;
-  position: relative;
-  word-break: break-all; /* 防止长路径溢出 */
-}
-
-.sources-list li:before {
-  content: '📄';
-  position: absolute;
-  left: 0;
-}
-
-/* Markdown渲染样式 */
+/* Markdown渲染样式 - 暗色主题 */
 .markdown-body {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif;
   font-size: 16px;
   line-height: 1.6;
-  color: #24292f;
+  color: #e0e0e0;
   word-wrap: break-word;
 }
 
@@ -466,10 +427,11 @@ h2 {
   margin-bottom: 16px;
   font-weight: 600;
   line-height: 1.25;
+  color: #fff;
 }
 
-.markdown-body h1 { font-size: 2em; border-bottom: 1px solid #d0d7de; padding-bottom: .3em; }
-.markdown-body h2 { font-size: 1.5em; border-bottom: 1px solid #d0d7de; padding-bottom: .3em; }
+.markdown-body h1 { font-size: 2em; border-bottom: 1px solid rgba(255, 255, 255, 0.1); padding-bottom: .3em; }
+.markdown-body h2 { font-size: 1.5em; border-bottom: 1px solid rgba(255, 255, 255, 0.1); padding-bottom: .3em; }
 .markdown-body h3 { font-size: 1.25em; }
 .markdown-body h4 { font-size: 1em; }
 
@@ -483,9 +445,10 @@ h2 {
   margin: 0;
   font-size: 85%;
   white-space: break-spaces;
-  background-color: rgba(175,184,193,0.2);
+  background-color: rgba(255, 255, 255, 0.1);
   border-radius: 6px;
   font-family: ui-monospace, SFMono-Regular, SF Mono, Menlo, Consolas, Liberation Mono, monospace;
+  color: #fff;
 }
 
 .markdown-body pre {
@@ -493,10 +456,11 @@ h2 {
   overflow: auto;
   font-size: 85%;
   line-height: 1.45;
-  background-color: #f6f8fa;
+  background-color: #1a1a1a;
   border-radius: 6px;
   margin-top: 0;
   margin-bottom: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
 }
 
 .markdown-body pre code {
@@ -518,13 +482,13 @@ h2 {
 .markdown-body blockquote {
   margin: 0 0 16px;
   padding: 0 1em;
-  color: #57606a;
-  border-left: .25em solid #d0d7de;
+  color: #888;
+  border-left: .25em solid rgba(255, 255, 255, 0.2);
 }
 
 .markdown-body a {
-  color: #0969da;
-  text-decoration: none;
+  color: #fff;
+  text-decoration: underline;
 }
 
 .markdown-body a:hover {
@@ -543,56 +507,32 @@ h2 {
 }
 
 .markdown-body table tr {
-  background-color: #ffffff;
-  border-top: 1px solid hsla(210,18%,87%,1);
+  background-color: #141414;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
 }
 
 .markdown-body table th,
 .markdown-body table td {
   padding: 6px 13px;
-  border: 1px solid #d0d7de;
+  border: 1px solid rgba(255, 255, 255, 0.1);
 }
 
 .markdown-body table th {
   font-weight: 600;
-  background-color: #f6f8fa;
+  background-color: #1a1a1a;
 }
 
 .markdown-body img {
   max-width: 100%;
   box-sizing: content-box;
-  background-color: #ffffff;
+  background-color: #141414;
 }
 
 .markdown-body hr {
   height: .25em;
   padding: 0;
   margin: 24px 0;
-  background-color: #d0d7de;
+  background-color: rgba(255, 255, 255, 0.1);
   border: 0;
-}
-
-.streaming-wrapper {
-  position: relative;
-  display: inline-block;
-  width: 100%;
-}
-
-.streaming-answer {
-  position: relative;
-  display: inline;
-}
-
-.streaming-cursor {
-  display: inline-block;
-  animation: blink 1s infinite;
-  font-weight: bold;
-  color: #667eea;
-  margin-left: 2px;
-}
-
-@keyframes blink {
-  0%, 50% { opacity: 1; }
-  51%, 100% { opacity: 0; }
 }
 </style>

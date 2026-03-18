@@ -38,10 +38,10 @@ const router = createRouter({
 })
 
 // 全局前置守卫：检查登录状态和角色权限
-router.beforeEach(async (to, from, next) => {
+router.beforeEach(async (to, from) => {
   // 如果页面不需要认证，直接放行
   if (!to.meta.requiresAuth) {
-    return next()
+    return
   }
 
   try {
@@ -55,24 +55,23 @@ router.beforeEach(async (to, from, next) => {
       if (to.meta.role && to.meta.role !== userRole) {
         // 角色不匹配，重定向到正确的页面
         if (userRole === 'student') {
-          return next('/student')
+          return '/student'
         } else if (userRole === 'teacher') {
-          return next('/teacher')
+          return '/teacher'
         } else {
-          return next('/login')
+          return '/login'
         }
-      } else {
-        // 认证通过，放行
-        return next()
       }
+      // 认证通过，放行
+      return
     } else {
       // 未登录，重定向到登录页
-      return next('/login')
+      return '/login'
     }
   } catch (error) {
     // 检查认证失败，重定向到登录页
     console.error('认证检查失败:', error)
-    return next('/login')
+    return '/login'
   }
 })
 
