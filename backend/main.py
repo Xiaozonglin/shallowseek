@@ -163,7 +163,7 @@ def init_vector_db():
     else:
         docs_dir = os.path.join(BASE_DIR, "..", "docs")
         if not os.path.exists(docs_dir): os.makedirs(docs_dir)
-        loader = DirectoryLoader(docs_dir, glob="**/*.md", loader_cls=TextLoader)
+        loader = DirectoryLoader(docs_dir, glob="**/*.md", loader_cls=TextLoader, loader_kwargs={'encoding': 'utf-8'})
         docs = loader.load()
         if not docs: return None
         splits = RecursiveCharacterTextSplitter(chunk_size=600, chunk_overlap=100).split_documents(docs)
