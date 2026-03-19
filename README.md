@@ -7,13 +7,6 @@
 - 姚焱夫 (Yanfu Yao) - [YvesYao0209@foxmail.com](mailto:YvesYao0209@foxmail.com)
 - 孟子钦 (Ziqin Meng) - [3862834578@qq.com](mailto:3862834578@qq.com)
 
-**Supervisor**
-- 指导老师：XXX 教授 - [email] - Xidian University, School of XXX
-
-**Affiliation**
-
-西安电子科技大学 | Xidian University
-
 ---
 
 **XDWe** (Xidian + We) is a collaborative, RAG-driven platform designed to transform Xidian University’s academic resources into an intelligent, teacher-verified knowledge network. It empowers students with instant, high-fidelity answers while ensuring educators retain full pedagogical control.
