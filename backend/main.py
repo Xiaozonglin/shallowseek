@@ -657,40 +657,94 @@ def set_authoritative_answer(q_id):
 # ========================== AI 问答接口 ==========================
 @app.route("/api/qa", methods=["POST"])
 @login_required
-@rate_limit(limit=10, window=60)  # 每分钟最多10次提问
+@rate_limit(limit=10, window=60)
 def qa():
     data = flask.request.json
     query = data.get('question')
     if not query: return flask.jsonify({"error": "问题不能为空"}), 400
     
-    # 清理和验证问题内容
     query = sanitize_input(query, max_length=1000)
-    if not query or len(query.strip()) < 1:
-        return flask.jsonify({"error": "问题不能为空"}), 400
-
-    # 1. 核心：检索老师提供的权威知识 (最高优先级)
-    authoritative_context = find_authoritative_knowledge(query)
-
-    # 2. AI 极速前置工具推断
-    tool_context = check_and_run_tools(query)
-
-    # 3. 检索本地文件知识库
-    context = ""
-    if retriever:
-        docs = retriever.invoke(query)
-        context = "\n".join([d.page_content for d in docs])
-    
-    # 4. 获取对话历史
     history = get_history(current_user.id)
 
-    # 5. 构造 Prompt
-    # 注意：权威答案放在了最显眼的位置，并要求 AI 优先参考
+    def generate_search_queries(query, history):
+        """
+        让 AI 根据当前问题和历史记录，生成最适合搜索的 1-3 个关键词
+        """
+        prompt = f"""<|im_start|>system
+你是一个搜索优化专家。请根据用户的提问和对话历史，提取出最适合在知识库中搜索的关键词。
+要求：
+1. 除去语气词，保留核心学术/技术名词。
+2. 如果问题涉及比较，请拆分为多个关键词。
+3. 直接输出关键词，用逗号分隔，不要有任何解释。
+<|im_end|>
+<|im_start|>user
+【历史记录】：{history}
+【当前问题】：{query}
+生成搜索词：<|im_end|>
+<|im_start|>assistant
+"""
+        inputs = tokenizer(prompt, return_tensors="pt").to(DEVICE)
+        outputs = model.generate(**inputs, max_new_tokens=50, temperature=0.1)
+        refined_queries = tokenizer.decode(outputs[0][inputs.input_ids.shape[1]:], skip_special_tokens=True).strip()
+    
+        # 将生成的字符串拆分为列表，例如 "微积分, 牛顿莱布尼茨公式" -> ["微积分", "牛顿莱布尼茨公式"]
+        query_list = [q.strip() for q in refined_queries.split(',')]
+        return query_list
+
+    # ========================== 阶段 1：主动决策 ==========================
+    # 告诉模型它有哪些“技能”，让它决定用哪个
+    decision_system_prompt = (
+        "你是一个学习助手决策中心。根据用户问题，选择最合适的工具。可用工具：\n"
+        "- [SEARCH_AUTH]: 用户询问课程规定、老师讲过的重点或权威定义时使用。\n"
+        "- [SEARCH_DOCS]: 用户询问具体课本知识、PDF文档内容或详细技术细节时使用。\n"
+        "- [USE_TOOL]: 用户需要数学计算(calculate)或查询网页(fetch_url)时使用。\n"
+        "- [DIRECT_REPLY]: 简单的寒暄、日常对话或无需参考资料的问题。\n"
+        "请直接输出工具标签，不要解释。"
+    )
+    
+    decision_prompt = (
+        f"<|im_start|>system\n{decision_system_prompt}<|im_end|>\n"
+        f"<|im_start|>user\n问题: {query}\n最近对话记录: {history}\n决策结果:<|im_end|>\n"
+        f"<|im_start|>assistant\n"
+    )
+
+    # 快速推理获取决策（非流式）
+    d_inputs = tokenizer(decision_prompt, return_tensors="pt").to(DEVICE)
+    d_outputs = model.generate(**d_inputs, max_new_tokens=20, temperature=0.1)
+    decision = tokenizer.decode(d_outputs[0][d_inputs.input_ids.shape[1]:], skip_special_tokens=True).strip()
+
+    # ========================== 阶段 2：执行检索 ==========================
+    retrieved_context = ""
+    
+    if "[SEARCH_AUTH]" in decision:
+        retrieved_context += find_authoritative_knowledge(query)
+    
+    if "[SEARCH_DOCS]" in decision:
+        if retriever:
+            search_keywords = generate_search_queries(query, history)
+            print(f"AI 决定的搜索关键词: {search_keywords}")
+
+            context_list = []
+            for kw in search_keywords:
+                    docs = retriever.invoke(kw) # 使用 AI 生成的关键词进行检索
+                    context_list.extend([d.page_content for d in docs])
+
+            # 去重并合并背景资料
+            retrieved_context += "\n【本地文件参考】:\n" + "\n---\n".join(list(set(context_list)))
+            
+    if "[USE_TOOL]" in decision:
+        retrieved_context += check_and_run_tools(query)
+
+    # ========================== 阶段 3：最终流式回答 ==========================
+    final_system_prompt = (
+        "你是学习助手。请根据以下检索到的资料和对话历史回答用户。\n"
+        "如果资料中没有相关信息，请诚实回答。如果存在【权威参考】，必须以此为准。"
+    )
+    
     full_prompt = (
-        f"<|im_start|>system\n你是学习助手。请参考以下资料回答。如果【权威参考】存在且与问题相关，请务必以该答案为准。\n\n"
-        f"【权威参考】:\n{authoritative_context if authoritative_context else '暂无老师提供的权威参考资料。'}\n\n"
-        f"【本地资料库】:\n{context}\n\n"
-        f"{tool_context}\n"
-        f"【历史记录】:\n{history}<|im_end|>\n"
+        f"<|im_start|>system\n{final_system_prompt}\n\n"
+        f"【检索到的资料】:\n{retrieved_context if retrieved_context else '无需外部资料'}\n\n"
+        f"【对话历史记录】:\n{history}<|im_end|>\n"
         f"<|im_start|>user\n{query}<|im_end|>\n"
         f"<|im_start|>assistant\n"
     )
@@ -698,18 +752,14 @@ def qa():
     def generate():
         streamer = TextIteratorStreamer(tokenizer, skip_prompt=True, timeout=60)
         inputs = tokenizer(full_prompt, return_tensors="pt").to(DEVICE)
-        generation_kwargs = dict(inputs, streamer=streamer, max_new_tokens=512, temperature=0.7, do_sample=True)
+        generation_kwargs = dict(inputs, streamer=streamer, max_new_tokens=1024, temperature=0.7, do_sample=True)
         thread = threading.Thread(target=model.generate, kwargs=generation_kwargs)
         thread.start()
 
         full_answer = ""
         try:
             for token in streamer:
-                # 过滤特殊标记
-                if '<|im_end|>' in token or '<|im_start|>' in token:
-                    token = token.replace('<|im_end|>', '').replace('<|im_start|>', '')
-                    if not token.strip():
-                        continue
+                if '<|im_end|>' in token: break
                 full_answer += token
                 yield f"data: {json.dumps({'token': token})}\n\n"
         except Exception as e:
@@ -720,11 +770,8 @@ def qa():
             db.session.add(new_record)
             db.session.commit()
 
-    # 禁用缓冲，确保实时传输
     response = Response(stream_with_context(generate()), mimetype='text/event-stream')
-    response.headers['Cache-Control'] = 'no-cache'
-    response.headers['X-Accel-Buffering'] = 'no'
-    response.headers['Connection'] = 'keep-alive'
+    response.headers.update({'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no', 'Connection': 'keep-alive'})
     return response
 
 
