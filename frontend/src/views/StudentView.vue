@@ -74,10 +74,14 @@
               >
                 <template #renderItem="{ item, index }">
                   <a-list-item :key="index">
-                    <a-list-item-meta
-                      :title="`<strong>Q:</strong> ${item.question}`"
-                      :description="`<strong>A:</strong> ${item.answer}`"
-                    />
+                    <a-card size="small" class="history-item">
+                      <div class="history-question">
+                        <span class="history-label">Q:</span>
+                        <span>{{ item.question }}</span>
+                      </div>
+                      <div class="history-answer markdown-body" v-html="renderHistoryAnswer(item.answer)">
+                      </div>
+                    </a-card>
                   </a-list-item>
                 </template>
               </a-list>
@@ -87,6 +91,7 @@
 
         <!-- 右侧：留言给老师 -->
         <a-col :xs="24" :md="8">
+          <!-- 发送留言卡片 -->
           <a-card title="给老师留言" class="message-section">
             <a-form layout="vertical">
               <a-form-item>
@@ -116,6 +121,44 @@
               show-icon
             />
           </a-card>
+
+          <!-- 留言历史卡片 -->
+          <a-card title="留言历史" class="message-history-section">
+            <a-empty v-if="messages.length === 0" description="暂无留言历史" />
+            
+            <a-list v-else
+              item-layout="vertical"
+              :data-source="messages"
+              size="small"
+            >
+              <template #renderItem="{ item }">
+                <a-list-item>
+                  <a-card size="small">
+                    <template #title>
+                      <span>留言时间：{{ new Date(item.timestamp).toLocaleString('zh-CN') }}</span>
+                    </template>
+                    <p>{{ item.content }}</p>
+                    
+                    <!-- 显示老师回复 -->
+                    <div v-if="item.reply_content" style="margin-top: 12px;">
+                      <a-divider style="margin: 8px 0;" />
+                      <p style="color: #1890ff;"><strong>老师回复:</strong> {{ item.reply_content }}</p>
+                      <p v-if="item.reply_timestamp" style="font-size: 12px; color: #888;">
+                        回复时间：{{ new Date(item.reply_timestamp).toLocaleString('zh-CN') }}
+                      </p>
+                    </div>
+                    
+                    <!-- 显示状态 -->
+                    <div v-else style="margin-top: 8px;">
+                      <a-tag :color="item.status === 'replied' ? 'green' : 'orange'">
+                        {{ item.status === 'replied' ? '已回复' : '未回复' }}
+                      </a-tag>
+                    </div>
+                  </a-card>
+                </a-list-item>
+              </template>
+            </a-list>
+          </a-card>
         </a-col>
       </a-row>
     </a-layout-content>
@@ -140,6 +183,7 @@ export default {
     const loading = ref(false);
     const sources = ref([]);
     const history = ref([]);
+    const messages = ref([]); // 新增：留言历史
     const messageToTeacher = ref('');
     const sendingMessage = ref(false);
     const messageSuccess = ref(false);
@@ -209,6 +253,16 @@ export default {
       const withLatex = renderLatex(cleanAnswer)
       return marked(withLatex)
     })
+
+    // 渲染历史答案的方法
+    const renderHistoryAnswer = (answer) => {
+      if (!answer) return ''
+      let cleanAnswer = answer
+        .replace(/<\|im_end\|>/g, '')
+        .replace(/<\|im_start\|>/g, '')
+      const withLatex = renderLatex(cleanAnswer)
+      return marked(withLatex)
+    }
 
     // 新增：登出方法
     const logout = async () => {
@@ -305,6 +359,10 @@ export default {
         
         messageSuccess.value = true
         messageToTeacher.value = '' // 清空输入框
+        
+        // 重新加载留言历史
+        await fetchMessages()
+        
         setTimeout(() => {
           messageSuccess.value = false
         }, 3000)
@@ -317,6 +375,43 @@ export default {
       }
     }
 
+    // 加载历史问答记录
+    const fetchQuestionHistory = async () => {
+      try {
+        const response = await axios.get('/api/student/questions/history')
+        // 将历史记录转换为前端需要的格式
+        history.value = response.data.map(item => ({
+          question: item.question,
+          answer: item.answer
+        }))
+      } catch (error) {
+        console.error('加载历史记录失败:', error)
+        if (error.response?.status !== 401) {
+          // 如果不是认证错误，才显示错误
+          console.error('加载历史记录失败:', error)
+        }
+      }
+    }
+
+    // 加载留言历史记录
+    const fetchMessages = async () => {
+      try {
+        const response = await axios.get('/api/messages')
+        messages.value = response.data
+      } catch (error) {
+        console.error('加载留言历史失败:', error)
+        if (error.response?.status !== 401) {
+          console.error('加载留言历史失败:', error)
+        }
+      }
+    }
+
+    // 页面加载时获取历史数据
+    onMounted(() => {
+      fetchQuestionHistory()
+      fetchMessages()
+    })
+
     return {
       question,
       answer,
@@ -324,6 +419,7 @@ export default {
       sources,
       loading,
       history,
+      messages, // 新增：返回留言历史
       messageToTeacher,
       sendingMessage,
       messageSuccess,
@@ -331,7 +427,8 @@ export default {
       submitQuestion,
       sendMessageToTeacher,
       renderedAnswer,
-      renderedStreamingAnswer
+      renderedStreamingAnswer,
+      renderHistoryAnswer  // 新增：返回历史答案渲染方法
     }
   }
 }
@@ -344,7 +441,8 @@ export default {
 }
 
 .qa-section,
-.message-section {
+.message-section,
+.message-history-section {
   margin-bottom: 24px;
 }
 
@@ -406,6 +504,34 @@ export default {
 
 .history-section {
   margin-top: 24px;
+}
+
+.history-item {
+  background: #1a1a1a;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  margin-bottom: 16px;
+}
+
+.history-question {
+  margin-bottom: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.history-label {
+  font-weight: 600;
+  color: #fff;
+  margin-right: 8px;
+}
+
+.history-answer {
+  padding: 12px;
+  background: #141414;
+  border-radius: 6px;
+  font-size: 14px;
+  line-height: 1.6;
+  color: #e0e0e0;
 }
 
 /* Markdown渲染样式 - 暗色主题 */

@@ -27,7 +27,7 @@
 </template>
 
 <script setup>
-import { computed, ref, onMounted } from 'vue'
+import { computed, ref, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import axios from 'axios'
 import { Layout, Menu, Button, Space } from 'ant-design-vue'
@@ -36,7 +36,7 @@ const { Header, Content, Footer, Sider } = Layout
 const route = useRoute()
 const router = useRouter()
 
-const isLoginPage = computed(() => route.path === '/login')
+const isLoginPage = computed(() => route.path === '/login' || route.path === '/register')
 const user = ref(null)
 
 const fetchUserInfo = async () => {
@@ -44,6 +44,8 @@ const fetchUserInfo = async () => {
     const response = await axios.get('/api/check-auth')
     if (response.data.authenticated) {
       user.value = response.data.user
+    } else {
+      user.value = null
     }
   } catch (error) {
     console.error('获取用户信息失败:', error)
@@ -54,6 +56,13 @@ const fetchUserInfo = async () => {
 onMounted(() => {
   fetchUserInfo()
 })
+
+// 监听路由变化，自动获取用户信息
+watch(() => route.path, () => {
+  if (!isLoginPage.value) {
+    fetchUserInfo()
+  }
+}, { immediate: false })
 
 const handleLogout = async () => {
   try {

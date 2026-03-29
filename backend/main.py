@@ -1,5 +1,6 @@
 import os
 import json
+import re
 import torch
 import threading
 import requests
@@ -8,6 +9,7 @@ from bs4 import BeautifulSoup
 from datetime import datetime
 from dotenv import load_dotenv
 from datetime import timedelta
+from functools import wraps
 
 if torch.cuda.is_available():
     os.environ["CUDA_MODULE_LOADING"] = "LAZY"
@@ -46,6 +48,22 @@ app.config['REMEMBER_COOKIE_SECURE'] = False
 app.config['REMEMBER_COOKIE_HTTPONLY'] = True
 app.config['REMEMBER_COOKIE_SAMESITE'] = 'Lax'
 
+# 安全头部配置
+app.config['SESSION_COOKIE_NAME'] = 'session_id'
+
+# 速率限制配置
+from collections import defaultdict
+from time import time
+
+RATE_LIMIT_STORE = defaultdict(list)
+
+# 密码强度要求
+PASSWORD_MIN_LENGTH = 8
+PASSWORD_REQUIRE_UPPER = True
+PASSWORD_REQUIRE_LOWER = True
+PASSWORD_REQUIRE_DIGIT = True
+PASSWORD_REQUIRE_SPECIAL = False
+
 # 邮件配置
 app.config['MAIL_SERVER'] = os.getenv('EMAIL_HOST')
 app.config['MAIL_PORT'] = int(os.getenv('EMAIL_PORT', 587))
@@ -59,6 +77,75 @@ bcrypt = Bcrypt(app)
 mail = Mail(app)
 login_manager = LoginManager(app)
 login_manager.login_view = 'login'
+
+# ========================== 安全工具函数 ==========================
+
+def is_strong_password(password):
+    """检查密码强度"""
+    if len(password) < PASSWORD_MIN_LENGTH:
+        return False, f"密码长度至少需要 {PASSWORD_MIN_LENGTH} 位"
+    
+    if PASSWORD_REQUIRE_UPPER and not re.search(r'[A-Z]', password):
+        return False, "密码需要包含至少一个大写字母"
+    
+    if PASSWORD_REQUIRE_LOWER and not re.search(r'[a-z]', password):
+        return False, "密码需要包含至少一个小写字母"
+    
+    if PASSWORD_REQUIRE_DIGIT and not re.search(r'\d', password):
+        return False, "密码需要包含至少一个数字"
+    
+    if PASSWORD_REQUIRE_SPECIAL and not re.search(r'[!@#$%^&*(),.?":{}|<>]', password):
+        return False, "密码需要包含至少一个特殊字符"
+    
+    return True, "密码强度符合要求"
+
+def sanitize_input(text, max_length=1000):
+    """清理用户输入，防止XSS和注入攻击"""
+    if not text:
+        return text
+    
+    # 截断过长文本
+    text = str(text)[:max_length]
+    
+    # 移除潜在危险字符（基础XSS防护）
+    # 注意：这只是基础防护，完整方案应结合前端转义和CSP
+    text = text.replace('<script', '&lt;script')
+    text = text.replace('javascript:', '')
+    text = text.replace('onerror=', '')
+    text = text.replace('onload=', '')
+    
+    return text.strip()
+
+def check_rate_limit(ip_address, limit=10, window=60):
+    """检查速率限制"""
+    current_time = time()
+    
+    # 清理过期记录
+    RATE_LIMIT_STORE[ip_address] = [
+        t for t in RATE_LIMIT_STORE[ip_address] if current_time - t < window
+    ]
+    
+    # 检查是否超过限制
+    if len(RATE_LIMIT_STORE[ip_address]) >= limit:
+        return False
+    
+    # 记录本次请求
+    RATE_LIMIT_STORE[ip_address].append(current_time)
+    return True
+
+def rate_limit(limit=10, window=60):
+    """速率限制装饰器"""
+    def decorator(f):
+        @wraps(f)
+        def decorated_function(*args, **kwargs):
+            ip_address = flask.request.remote_addr
+            if not check_rate_limit(ip_address, limit, window):
+                return flask.jsonify({
+                    "error": "请求过于频繁，请稍后再试"
+                }), 429
+            return f(*args, **kwargs)
+        return decorated_function
+    return decorator
 
 # ========================== 数据库模型 ==========================
 class User(UserMixin, db.Model):
@@ -262,30 +349,74 @@ def load_user(user_id):
     return db.session.get(User, int(user_id))
 
 @app.route("/api/register", methods=["POST"])
+@rate_limit(limit=5, window=300)  # 5分钟内最多5次注册尝试
 def register():
     data = flask.request.json
     if not data or 'username' not in data or 'email' not in data or 'password' not in data or 'role' not in data:
         return flask.jsonify({"error": "Missing required fields"}), 400
-    if User.query.filter_by(username=data['username']).first():
-        return flask.jsonify({"error": "Username already exists"}), 400
-    if User.query.filter_by(email=data['email']).first():
-        return flask.jsonify({"error": "Email already exists"}), 400
-    hashed_password = bcrypt.generate_password_hash(data['password']).decode('utf-8')
-    user = User(username=data['username'], email=data['email'], password=hashed_password, role=data['role'])
+    
+    # 用户名验证
+    username = sanitize_input(data['username'], max_length=20)
+    if not username or len(username) < 3:
+        return flask.jsonify({"error": "用户名至少需要3个字符"}), 400
+    if not re.match(r'^[a-zA-Z0-9_]+$', username):
+        return flask.jsonify({"error": "用户名只能包含字母、数字和下划线"}), 400
+    
+    # 邮箱验证
+    email = sanitize_input(data['email'], max_length=120).lower()
+    if not re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', email):
+        return flask.jsonify({"error": "邮箱格式不正确"}), 400
+    
+    # 密码强度验证
+    password = data['password']
+    is_valid, msg = is_strong_password(password)
+    if not is_valid:
+        return flask.jsonify({"error": msg}), 400
+    
+    # 角色验证
+    role = sanitize_input(data['role'], max_length=10)
+    if role not in ['student', 'teacher']:
+        return flask.jsonify({"error": "角色必须是 student 或 teacher"}), 400
+    
+    # 检查重复
+    if User.query.filter_by(username=username).first():
+        return flask.jsonify({"error": "用户名已存在"}), 400
+    if User.query.filter_by(email=email).first():
+        return flask.jsonify({"error": "邮箱已被注册"}), 400
+    
+    # 创建用户
+    hashed_password = bcrypt.generate_password_hash(password).decode('utf-8')
+    user = User(username=username, email=email, password=hashed_password, role=role)
     db.session.add(user)
     db.session.commit()
-    return flask.jsonify({"message": "User registered successfully"}), 201
+    return flask.jsonify({"message": "注册成功"}), 201
 
 @app.route("/api/login", methods=["POST"])
+@rate_limit(limit=5, window=300)  # 5分钟内最多5次登录尝试
 def login():
     data = flask.request.json
     if not data or 'email' not in data or 'password' not in data:
-        return flask.jsonify({"error": "Missing required fields"}), 400
-    user = User.query.filter_by(email=data['email']).first()
-    if not user or not bcrypt.check_password_hash(user.password, data['password']):
-        return flask.jsonify({"error": "Invalid email or password"}), 401
+        return flask.jsonify({"error": "缺少必填字段"}), 400
+    
+    # 清理输入
+    email = sanitize_input(data['email'], max_length=120).lower()
+    password = data['password']
+    
+    # 邮箱格式验证
+    if not re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', email):
+        return flask.jsonify({"error": "邮箱格式不正确"}), 400
+    
+    # 密码长度限制
+    if len(password) > 128:
+        return flask.jsonify({"error": "密码过长"}), 400
+    
+    # 验证用户
+    user = User.query.filter_by(email=email).first()
+    if not user or not bcrypt.check_password_hash(user.password, password):
+        return flask.jsonify({"error": "邮箱或密码错误"}), 401
+    
     login_user(user)
-    return flask.jsonify({"message": "Login successful", "role": user.role}), 200
+    return flask.jsonify({"message": "登录成功", "role": user.role}), 200
 
 @app.route("/api/check-auth", methods=["GET"])
 def check_auth():
@@ -314,6 +445,32 @@ def logout():
         # 即使登出失败，也返回成功，让前端可以跳转到登录页
         print(f"Logout error: {e}")
         return flask.jsonify({"message": "Logout successful"}), 200
+
+# ========================== 学生历史问答接口 ==========================
+
+@app.route("/api/student/questions/history", methods=["GET"])
+@login_required
+def get_student_question_history():
+    """获取当前学生的历史问答记录"""
+    if current_user.role != 'student':
+        return flask.jsonify({"error": "Permission denied"}), 403
+    
+    # 获取最近50条问答记录
+    questions = Question.query.filter_by(
+        student_id=current_user.id
+    ).order_by(Question.timestamp.desc()).limit(50).all()
+    
+    result = []
+    for q in questions:
+        result.append({
+            "id": q.id,
+            "question": q.content,
+            "answer": q.answer,
+            "authoritative_answer": q.authoritative_answer,
+            "timestamp": q.timestamp.isoformat()
+        })
+    
+    return flask.jsonify(result), 200
 
 # ========================== 权威答案管理 (老师专属) ==========================
 
@@ -500,10 +657,16 @@ def set_authoritative_answer(q_id):
 # ========================== AI 问答接口 ==========================
 @app.route("/api/qa", methods=["POST"])
 @login_required
+@rate_limit(limit=10, window=60)  # 每分钟最多10次提问
 def qa():
     data = flask.request.json
     query = data.get('question')
-    if not query: return flask.jsonify({"error": "Empty question"}), 400
+    if not query: return flask.jsonify({"error": "问题不能为空"}), 400
+    
+    # 清理和验证问题内容
+    query = sanitize_input(query, max_length=1000)
+    if not query or len(query.strip()) < 1:
+        return flask.jsonify({"error": "问题不能为空"}), 400
 
     # 1. 核心：检索老师提供的权威知识 (最高优先级)
     authoritative_context = find_authoritative_knowledge(query)
@@ -569,13 +732,19 @@ def qa():
 
 @app.route("/api/messages", methods=["GET", "POST"])
 @login_required
+@rate_limit(limit=20, window=60)  # 每分钟最多20次留言操作
 def handle_messages():
     if flask.request.method == "POST":
         data = flask.request.json
         if not data or 'content' not in data:
-            return flask.jsonify({"error": "Missing message content"}), 400
+            return flask.jsonify({"error": "缺少留言内容"}), 400
         
-        new_content = data['content']
+        # 清理和验证留言内容
+        new_content = sanitize_input(data['content'], max_length=1000)
+        if not new_content or len(new_content.strip()) < 1:
+            return flask.jsonify({"error": "留言内容不能为空"}), 400
+        if len(new_content) > 1000:
+            return flask.jsonify({"error": "留言内容不能超过1000字"}), 400
         
         # 1. 先把留言存入数据库（无论是否重复，都要存）
         message = Message(content=new_content, sender_id=current_user.id)
@@ -660,6 +829,23 @@ def reply_message(msg_id):
     message.status = 'replied'
     db.session.commit()
     return flask.jsonify({"message": "Replied successfully"}), 200
+
+@app.after_request
+def add_security_headers(response):
+    """添加安全响应头"""
+    # 防止MIME类型嗅探
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    # 防止点击劫持
+    response.headers['X-Frame-Options'] = 'SAMEORIGIN'
+    # 启用XSS保护
+    response.headers['X-XSS-Protection'] = '1; mode=block'
+    # 内容安全策略（基础配置，可根据需要调整）
+    response.headers['Content-Security-Policy'] = "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:;"
+    # 严格传输安全（生产环境应启用）
+    if app.config['SESSION_COOKIE_SECURE']:
+        response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
+    
+    return response
 
 if __name__ == "__main__":
     app.run(debug=False, port=5000, threaded=True)
