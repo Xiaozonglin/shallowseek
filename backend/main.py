@@ -7,6 +7,7 @@ import sympy
 from bs4 import BeautifulSoup
 from datetime import datetime
 from dotenv import load_dotenv
+from datetime import timedelta
 
 if torch.cuda.is_available():
     os.environ["CUDA_MODULE_LOADING"] = "LAZY"
@@ -23,7 +24,7 @@ from flask_bcrypt import Bcrypt
 from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
 from flask_mail import Mail, Message as MailMessage
 
-from langchain_community.document_loaders import DirectoryLoader, TextLoader
+from langchain_community.document_loaders import DirectoryLoader, TextLoader, PyMuPDFLoader, UnstructuredImageLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_huggingface import HuggingFaceEmbeddings
@@ -163,10 +164,22 @@ def init_vector_db():
     else:
         docs_dir = os.path.join(BASE_DIR, "..", "docs")
         if not os.path.exists(docs_dir): os.makedirs(docs_dir)
-        loader = DirectoryLoader(docs_dir, glob="**/*.md", loader_cls=TextLoader, loader_kwargs={'encoding': 'utf-8'})
-        docs = loader.load()
+        
+        # 同时支持 .md, .pdf, .jpg, .png
+        loaders = {
+            ".md": DirectoryLoader(docs_dir, glob="**/*.md", loader_cls=TextLoader, loader_kwargs={'encoding': 'utf-8'}),
+            ".pdf": DirectoryLoader(docs_dir, glob="**/*.pdf", loader_cls=PyMuPDFLoader),
+            ".jpg": DirectoryLoader(docs_dir, glob="**/*.jpg", loader_cls=UnstructuredImageLoader),
+        }
+        
+        docs = []
+        for loader in loaders.values():
+            docs.extend(loader.load())
+            
         if not docs: return None
-        splits = RecursiveCharacterTextSplitter(chunk_size=600, chunk_overlap=100).split_documents(docs)
+        
+        # 3. 分块与入库
+        splits = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=150).split_documents(docs)
         vstore = FAISS.from_documents(splits, embedding)
         vstore.save_local(faiss_path)
     return vstore.as_retriever(search_kwargs={"k": 3})
@@ -562,23 +575,53 @@ def handle_messages():
         if not data or 'content' not in data:
             return flask.jsonify({"error": "Missing message content"}), 400
         
-        message = Message(content=data['content'], sender_id=current_user.id)
+        new_content = data['content']
+        
+        # 1. 先把留言存入数据库（无论是否重复，都要存）
+        message = Message(content=new_content, sender_id=current_user.id)
         db.session.add(message)
         db.session.commit()
         
-        if app.config.get('MAIL_SERVER') and app.config['MAIL_SERVER'] != 'smtp.example.com':
+        # 邮件去重逻辑开始
+        send_email = True
+        
+        # 获取最近 1 小时内的留言进行比对
+        one_hour_ago = datetime.utcnow() - timedelta(hours=24)
+        recent_msgs = Message.query.filter(
+            Message.timestamp >= one_hour_ago,
+            Message.id != message.id # 排除刚刚存入的这条
+        ).all()
+
+        if recent_msgs:
+            # 计算当前留言的向量
+            new_vec = embedding.embed_query(new_content)
+            
+            for m in recent_msgs:
+                # 计算与最近留言的相似度
+                m_vec = embedding.embed_query(m.content)
+                sim = util.cos_sim(new_vec, m_vec).item()
+                
+                if sim > 0.85: # 语义相似度阈值
+                    print(f"检测到相似留言 (相似度: {sim:.2f})，取消邮件提醒。")
+                    send_email = False
+                    break
+        # 邮件去重逻辑结束
+
+        # 执行邮件发送
+        if send_email and app.config.get('MAIL_SERVER') and app.config['MAIL_SERVER'] != 'smtp.example.com':
             try:
                 teachers = User.query.filter_by(role='teacher').all()
                 for teacher in teachers:
                     msg = MailMessage(
-                        '收到新的学生留言',
+                        '【新留言提醒】学生提交了新问题',
                         recipients=[teacher.email],
-                        body=f"老师您好，\n\n您有一条来自学生 ({current_user.username}) 的新留言：\n\n\"{data['content']}\"\n\n请登录系统查看和回复。"
+                        body=f"老师您好，\n\n学生 ({current_user.username}) 提交了新留言：\n\n\"{new_content}\"\n\n系统检测到这是近期首条此类内容的留言，请及时查看。"
                     )
                     mail.send(msg)
             except Exception as e:
                 print(f"Error sending email: {e}")
-        return flask.jsonify({"message": "Message sent successfully"}), 201
+                
+        return flask.jsonify({"message": "Message sent successfully", "notified": send_email}), 201
 
     if flask.request.method == "GET":
         if current_user.role == 'student':
