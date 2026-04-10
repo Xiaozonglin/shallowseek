@@ -4,7 +4,11 @@ faiss_index
 *.db
 model_weights
 rag-embedding
+vlm_weights
+instance
 
 node_modules
 
 docs
+__pycache__
+*.pyc

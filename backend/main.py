@@ -5,6 +5,11 @@ import torch
 import threading
 import requests
 import sympy
+import base64
+import io
+import cv2
+import numpy as np
+from PIL import Image
 from bs4 import BeautifulSoup
 from datetime import datetime
 from dotenv import load_dotenv
@@ -30,7 +35,7 @@ from langchain_community.document_loaders import DirectoryLoader, TextLoader, Py
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_huggingface import HuggingFaceEmbeddings
-from transformers import AutoTokenizer, AutoModelForCausalLM, TextIteratorStreamer
+from transformers import AutoTokenizer, AutoModelForCausalLM, TextIteratorStreamer, AutoProcessor, AutoModelForMultimodalLM
 from sentence_transformers import SentenceTransformer, util
 
 # ========================== 基础配置 ==========================
@@ -77,6 +82,10 @@ bcrypt = Bcrypt(app)
 mail = Mail(app)
 login_manager = LoginManager(app)
 login_manager.login_view = 'login'
+
+@login_manager.user_loader
+def load_user(user_id):
+    return db.session.get(User, int(user_id))
 
 # ========================== 安全工具函数 ==========================
 
@@ -208,18 +217,20 @@ DEVICE, DTYPE = get_optimal_hardware_config()
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.abspath(os.path.join(BASE_DIR, "..", "model_weights"))
 EMBED_PATH = os.path.abspath(os.path.join(BASE_DIR, "..", "rag-embedding"))
+VLM_PATH = os.path.abspath(os.path.join(BASE_DIR, "..", "vlm_weights"))
 
 os.makedirs(MODEL_PATH, exist_ok=True)
 os.makedirs(EMBED_PATH, exist_ok=True)
+os.makedirs(VLM_PATH, exist_ok=True)
 
 def is_locally_available(path):
     return os.path.exists(os.path.join(path, "config.json"))
 
-print("🚀 正在初始化 RTX 5060 加速引擎...")
+print("正在初始化 RTX 5060 加速引擎...")
 
 # 1. 加载 LLM
 if not is_locally_available(MODEL_PATH):
-    print("🌐 第一次运行：正在从镜像站拉取 Qwen 模型...")
+    print("第一次运行：正在从镜像站拉取 Qwen 模型...")
     t_tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-1.5B-Instruct", trust_remote_code=True)
     t_model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen2.5-1.5B-Instruct", torch_dtype=DTYPE, device_map="auto" if DEVICE == "cuda" else None, trust_remote_code=True)
     t_tokenizer.save_pretrained(MODEL_PATH)
@@ -229,11 +240,11 @@ tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, local_files_only=True, tru
 model = AutoModelForCausalLM.from_pretrained(MODEL_PATH, torch_dtype=DTYPE, device_map="auto" if DEVICE == "cuda" else None, local_files_only=True, trust_remote_code=True, low_cpu_mem_usage=True,)
 
 if DEVICE == "cpu":
-        model = model.to("cpu")
+    model = model.to("cpu")
 
 # 2. 加载 Embedding
 if not is_locally_available(EMBED_PATH):
-    print("🌐 第一次运行：正在拉取 BGE 向量模型...")
+    print("第一次运行：正在拉取 BGE 向量模型...")
     e_model = SentenceTransformer("BAAI/bge-small-zh-v1.5")
     e_model.save(EMBED_PATH)
 
@@ -242,6 +253,113 @@ embedding = HuggingFaceEmbeddings(
     model_kwargs={'device': DEVICE},
     encode_kwargs={'normalize_embeddings': True}
 )
+
+# 3. 加载多模态视觉语言模型 (VLM)
+print("正在初始化多模态视觉模型...")
+try:
+    if not is_locally_available(VLM_PATH):
+        print("第一次运行：正在拉取多模态模型...")
+        try:
+            # 尝试使用BLIP模型 - 更小更快
+            from transformers import BlipProcessor, BlipForConditionalGeneration
+            
+            print("尝试下载BLIP模型...")
+            vlm_processor = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
+            vlm_model = BlipForConditionalGeneration.from_pretrained(
+                "Salesforce/blip-image-captioning-base",
+                torch_dtype=torch.float16 if DEVICE == "cuda" else torch.float32,
+                device_map="auto" if DEVICE == "cuda" else None
+            )
+            vlm_processor.save_pretrained(VLM_PATH)
+            vlm_model.save_pretrained(VLM_PATH)
+            print("BLIP 多模态模型下载成功")
+        except Exception as e:
+            print(f"⚠️ BLIP 模型下载失败: {e}")
+            print("⚠️ 尝试使用更小的模型...")
+            try:
+                # 尝试使用更小的ViT-GPT2模型
+                from transformers import VisionEncoderDecoderModel, ViTImageProcessor, AutoTokenizer
+                
+                print("尝试下载ViT-GPT2模型...")
+                vlm_processor = ViTImageProcessor.from_pretrained("nlpconnect/vit-gpt2-image-captioning")
+                vlm_model = VisionEncoderDecoderModel.from_pretrained(
+                    "nlpconnect/vit-gpt2-image-captioning",
+                    torch_dtype=torch.float16 if DEVICE == "cuda" else torch.float32,
+                    device_map="auto" if DEVICE == "cuda" else None
+                )
+                vlm_processor.save_pretrained(VLM_PATH)
+                vlm_model.save_pretrained(VLM_PATH)
+                print("ViT-GPT2 多模态模型下载成功")
+            except Exception as e2:
+                print(f"⚠️ 所有多模态模型下载失败: {e2}")
+                print("⚠️ 将使用纯文本模式，多模态功能不可用")
+                vlm_processor = None
+                vlm_model = None
+                vlm_available = False
+    else:
+        # 检查保存的模型类型
+        config_path = os.path.join(VLM_PATH, "config.json")
+        if os.path.exists(config_path):
+            import json
+            with open(config_path, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+            
+            model_type = config.get("_name_or_path", "") or config.get("model_type", "")
+            
+            if "blip" in model_type.lower():
+                from transformers import BlipProcessor, BlipForConditionalGeneration
+                vlm_processor = BlipProcessor.from_pretrained(VLM_PATH, local_files_only=True)
+                vlm_model = BlipForConditionalGeneration.from_pretrained(
+                    VLM_PATH,
+                    torch_dtype=torch.float16 if DEVICE == "cuda" else torch.float32,
+                    device_map="auto" if DEVICE == "cuda" else None,
+                    local_files_only=True
+                )
+            elif "vision-encoder-decoder" in model_type.lower():
+                from transformers import VisionEncoderDecoderModel, ViTImageProcessor, AutoTokenizer
+                vlm_processor = ViTImageProcessor.from_pretrained(VLM_PATH, local_files_only=True)
+                vlm_model = VisionEncoderDecoderModel.from_pretrained(
+                    VLM_PATH,
+                    torch_dtype=torch.float16 if DEVICE == "cuda" else torch.float32,
+                    device_map="auto" if DEVICE == "cuda" else None,
+                    local_files_only=True
+                )
+            else:
+                # 尝试通用加载
+                try:
+                    vlm_processor = AutoProcessor.from_pretrained(VLM_PATH, local_files_only=True, trust_remote_code=True)
+                    vlm_model = AutoModelForMultimodalLM.from_pretrained(
+                        VLM_PATH,
+                        torch_dtype=torch.float16 if DEVICE == "cuda" else torch.float32,
+                        device_map="auto" if DEVICE == "cuda" else None,
+                        local_files_only=True,
+                        trust_remote_code=True
+                    )
+                except:
+                    print("⚠️ 无法识别模型类型，将使用纯文本模式")
+                    vlm_processor = None
+                    vlm_model = None
+        else:
+            print("⚠️ 配置文件不存在，将使用纯文本模式")
+            vlm_processor = None
+            vlm_model = None
+    
+    # 检查变量是否已定义
+    if 'vlm_processor' in locals() and vlm_processor is not None and 'vlm_model' in locals() and vlm_model is not None:
+        if DEVICE == "cpu":
+            vlm_model = vlm_model.to("cpu")
+        
+        print("多模态视觉模型加载成功")
+        vlm_available = True
+    else:
+        print("⚠️ 多模态模型未加载，将使用纯文本模式")
+        vlm_available = False
+except Exception as e:
+    print(f"⚠️ 多模态视觉模型加载失败: {e}")
+    print("⚠️ 将使用纯文本模式，多模态功能不可用")
+    vlm_processor = None
+    vlm_model = None
+    vlm_available = False
 
 # 3. 向量库初始化
 def init_vector_db():
@@ -281,396 +399,163 @@ def get_history(user_id):
     return "\n".join([f"问：{r.content}\n答：{r.answer}" for r in records])
 
 def find_authoritative_knowledge(query):
-    """
-    检索数据库中老师提供的权威答案
-    """
-    # 查找所有包含权威答案的问题
-    auth_questions = Question.query.filter(Question.authoritative_answer != None).all()
-    if not auth_questions:
+    """查找权威知识（老师提供的答案）"""
+    try:
+        # 在问题库中搜索相似问题
+        questions = Question.query.filter(Question.authoritative_answer.isnot(None)).all()
+        
+        if not questions:
+            return ""
+        
+        # 使用嵌入向量计算相似度
+        query_vec = embedding.embed_query(query)
+        best_match = None
+        best_similarity = 0.7  # 相似度阈值
+        
+        for q in questions:
+            if q.content:
+                q_vec = embedding.embed_query(q.content)
+                similarity = util.cos_sim(query_vec, q_vec).item()
+                
+                if similarity > best_similarity:
+                    best_similarity = similarity
+                    best_match = q
+        
+        if best_match:
+            teacher = db.session.get(User, best_match.teacher_id)
+            teacher_name = teacher.username if teacher else "老师"
+            return f"\n【权威参考】来自{teacher_name}的解答：\n{best_match.authoritative_answer}\n"
+        
         return ""
-    
-    # 简单的语义匹配逻辑：通过 Embedding 计算当前问题与已有权威问题的相似度
-    query_vec = embedding.embed_query(query)
-    best_match = None
-    max_sim = 0.0
-    
-    for q in auth_questions:
-        # 这里为了演示使用实时计算，实际生产环境建议将权威答案也存入 FAISS
-        q_vec = embedding.embed_query(q.content)
-        sim = util.cos_sim(query_vec, q_vec).item()
-        if sim > max_sim:
-            max_sim = sim
-            best_match = q
-            
-    # 如果相似度高于阈值 (例如 0.8)，则作为权威参考提供
-    if best_match and max_sim > 0.8:
-        return f"\n【老师提供的权威参考内容 (匹配度: {max_sim:.2f})】:\n{best_match.authoritative_answer}\n"
-    return ""
+    except Exception as e:
+        print(f"查找权威知识错误: {e}")
+        return ""
 
 def check_and_run_tools(query):
-    system_msg = (
-        "你是一个工具决策器。根据用户提问，判断是否需要调用外部工具。可用工具：\n"
-        "1. fetch_url(url: 网址) - 用于访问特定网址。\n"
-        "2. calculate(expr: 表达式) - 用于数学计算。\n"
-        "如果需要访问网页，严格输出：CALL:fetch_url|网址\n"
-        "如果需要计算，严格输出：CALL:calculate|数学表达式\n"
-        "如果都不需要，严格输出：NONE"
-    )
-    
-    prompt = f"<|im_start|>system\n{system_msg}<|im_end|>\n<|im_start|>user\n{query}<|im_end|>\n<|im_start|>assistant\n"
-    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
-    outputs = model.generate(**inputs, max_new_tokens=30, temperature=0.1, do_sample=False)
-    response = tokenizer.decode(outputs[0][inputs.input_ids.shape[1]:], skip_special_tokens=True).strip()
-    
-    tool_result = ""
-    if response.startswith("CALL:fetch_url|"):
-        url = response.split("|", 1)[1].strip()
-        try:
-            res = requests.get(url, timeout=5, headers={"User-Agent": "Mozilla/5.0"})
-            soup = BeautifulSoup(res.text, 'html.parser')
-            text = soup.get_text(separator=' ', strip=True)[:1000]
-            tool_result = f"\n【AI工具: 从 {url} 抓取的内容】:\n{text}\n"
-        except Exception as e:
-            tool_result = f"\n【AI工具: 访问网页失败】: {str(e)}\n"
-    elif response.startswith("CALL:calculate|"):
-        expr = response.split("|", 1)[1].strip()
-        try:
-            ans = sympy.sympify(expr).evalf()
-            tool_result = f"\n【AI工具: 数学计算结果】: {expr} = {ans}\n"
-        except Exception as e:
-            tool_result = f"\n【AI工具: 计算解析失败】: {str(e)}\n"
-            
-    return tool_result
-
-# ========================== 路由逻辑 ==========================
-
-@login_manager.user_loader
-def load_user(user_id):
-    return db.session.get(User, int(user_id))
-
-@app.route("/api/register", methods=["POST"])
-@rate_limit(limit=5, window=300)  # 5分钟内最多5次注册尝试
-def register():
-    data = flask.request.json
-    if not data or 'username' not in data or 'email' not in data or 'password' not in data or 'role' not in data:
-        return flask.jsonify({"error": "Missing required fields"}), 400
-    
-    # 用户名验证
-    username = sanitize_input(data['username'], max_length=20)
-    if not username or len(username) < 3:
-        return flask.jsonify({"error": "用户名至少需要3个字符"}), 400
-    if not re.match(r'^[a-zA-Z0-9_]+$', username):
-        return flask.jsonify({"error": "用户名只能包含字母、数字和下划线"}), 400
-    
-    # 邮箱验证
-    email = sanitize_input(data['email'], max_length=120).lower()
-    if not re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', email):
-        return flask.jsonify({"error": "邮箱格式不正确"}), 400
-    
-    # 密码强度验证
-    password = data['password']
-    is_valid, msg = is_strong_password(password)
-    if not is_valid:
-        return flask.jsonify({"error": msg}), 400
-    
-    # 角色验证
-    role = sanitize_input(data['role'], max_length=10)
-    if role not in ['student', 'teacher']:
-        return flask.jsonify({"error": "角色必须是 student 或 teacher"}), 400
-    
-    # 检查重复
-    if User.query.filter_by(username=username).first():
-        return flask.jsonify({"error": "用户名已存在"}), 400
-    if User.query.filter_by(email=email).first():
-        return flask.jsonify({"error": "邮箱已被注册"}), 400
-    
-    # 创建用户
-    hashed_password = bcrypt.generate_password_hash(password).decode('utf-8')
-    user = User(username=username, email=email, password=hashed_password, role=role)
-    db.session.add(user)
-    db.session.commit()
-    return flask.jsonify({"message": "注册成功"}), 201
-
-@app.route("/api/login", methods=["POST"])
-@rate_limit(limit=5, window=300)  # 5分钟内最多5次登录尝试
-def login():
-    data = flask.request.json
-    if not data or 'email' not in data or 'password' not in data:
-        return flask.jsonify({"error": "缺少必填字段"}), 400
-    
-    # 清理输入
-    email = sanitize_input(data['email'], max_length=120).lower()
-    password = data['password']
-    
-    # 邮箱格式验证
-    if not re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', email):
-        return flask.jsonify({"error": "邮箱格式不正确"}), 400
-    
-    # 密码长度限制
-    if len(password) > 128:
-        return flask.jsonify({"error": "密码过长"}), 400
-    
-    # 验证用户
-    user = User.query.filter_by(email=email).first()
-    if not user or not bcrypt.check_password_hash(user.password, password):
-        return flask.jsonify({"error": "邮箱或密码错误"}), 401
-    
-    login_user(user)
-    return flask.jsonify({"message": "登录成功", "role": user.role}), 200
-
-@app.route("/api/check-auth", methods=["GET"])
-def check_auth():
-    """检查用户登录状态"""
-    if current_user.is_authenticated:
-        return flask.jsonify({
-            "authenticated": True,
-            "user": {
-                "id": current_user.id,
-                "username": current_user.username,
-                "email": current_user.email,
-                "role": current_user.role
-            }
-        }), 200
-    else:
-        return flask.jsonify({"authenticated": False}), 401
-
-@app.route("/api/logout", methods=["POST"])
-def logout():
-    # 移除@login_required装饰器，允许任何用户调用登出
-    # 即使session已经过期，也应该允许用户登出
+    """检查并运行工具（数学计算、网页抓取等）"""
     try:
-        logout_user()
-        return flask.jsonify({"message": "Logout successful"}), 200
+        # 检查是否需要数学计算
+        math_keywords = ['计算', '等于', '求解', '解方程', '积分', '微分', '求导', 'sin', 'cos', 'tan', 'log', 'ln']
+        if any(keyword in query.lower() for keyword in math_keywords):
+            try:
+                # 尝试使用sympy进行符号计算
+                expr = sympy.sympify(query.replace('计算', '').replace('等于', '=').strip())
+                result = sympy.N(expr)
+                return f"\n【数学计算】{query} = {result}\n"
+            except:
+                pass
+        
+        # 检查是否需要网页抓取
+        url_pattern = r'https?://[^\s]+'
+        urls = re.findall(url_pattern, query)
+        if urls:
+            try:
+                response = requests.get(urls[0], timeout=5)
+                soup = BeautifulSoup(response.text, 'html.parser')
+                # 提取主要文本内容
+                text = soup.get_text()[:500]  # 限制长度
+                return f"\n【网页内容摘要】{text}...\n"
+            except:
+                pass
+        
+        return ""
     except Exception as e:
-        # 即使登出失败，也返回成功，让前端可以跳转到登录页
-        print(f"Logout error: {e}")
-        return flask.jsonify({"message": "Logout successful"}), 200
+        print(f"工具运行错误: {e}")
+        return ""
 
-# ========================== 学生历史问答接口 ==========================
+# ========================== 多模态图像处理工具 ==========================
 
-@app.route("/api/student/questions/history", methods=["GET"])
-@login_required
-def get_student_question_history():
-    """获取当前学生的历史问答记录"""
-    if current_user.role != 'student':
-        return flask.jsonify({"error": "Permission denied"}), 403
-    
-    # 获取最近50条问答记录
-    questions = Question.query.filter_by(
-        student_id=current_user.id
-    ).order_by(Question.timestamp.desc()).limit(50).all()
-    
-    result = []
-    for q in questions:
-        result.append({
-            "id": q.id,
-            "question": q.content,
-            "answer": q.answer,
-            "authoritative_answer": q.authoritative_answer,
-            "timestamp": q.timestamp.isoformat()
-        })
-    
-    return flask.jsonify(result), 200
-
-# ========================== 权威答案管理 (老师专属) ==========================
-
-@app.route("/api/questions/stats", methods=["GET"])
-@login_required
-def get_question_stats():
-    """获取问题统计数据"""
-    if current_user.role != 'teacher':
-        return flask.jsonify({"error": "Permission denied"}), 403
-    
-    # 获取所有问题
-    questions = Question.query.all()
-    
-    # 统计总提问数
-    total_questions = len(questions)
-    
-    # 按学生分组统计
-    questions_by_student = {}
-    student_summaries = {}
-    
-    for q in questions:
-        student = db.session.get(User, q.student_id)
-        if student:
-            if student.username not in questions_by_student:
-                questions_by_student[student.username] = []
-            questions_by_student[student.username].append({
-                "question": q.content,
-                "answer": q.answer
-            })
-    
-    # 为每个学生生成 AI 学习情况分析
-    for student_name, qa_list in questions_by_student.items():
-        # 查找学生用户
-        student_user = User.query.filter_by(username=student_name).first()
+def process_image_base64(image_base64):
+    """处理base64编码的图像"""
+    try:
+        # 移除data:image/...;base64,前缀
+        if ',' in image_base64:
+            image_base64 = image_base64.split(',')[1]
         
-        # 检查是否需要更新分析（每24小时更新一次）
-        need_update = False
-        if student_user:
-            if not student_user.summary_updated_at:
-                need_update = True
-            elif (datetime.utcnow() - student_user.summary_updated_at).total_seconds() > 86400:  # 24小时
-                need_update = True
+        # 解码base64
+        image_data = base64.b64decode(image_base64)
+        image = Image.open(io.BytesIO(image_data))
         
-        # 如果有缓存且不需要更新，使用缓存
-        if student_user and student_user.learning_summary and not need_update:
-            student_summaries[student_name] = student_user.learning_summary
-            continue
+        # 转换为RGB格式
+        if image.mode != 'RGB':
+            image = image.convert('RGB')
         
-        # 构建学生的学习内容
-        qa_text = "\n".join([
-            f"问题: {qa['question']}\n回答摘要: {qa['answer'][:100] if qa['answer'] else '无'}..."
-            for qa in qa_list[:5]  # 最多取5个问题
-        ])
+        return image
+    except Exception as e:
+        print(f"图像处理错误: {e}")
+        return None
+
+def extract_text_from_image(image):
+    """从图像中提取文字（使用VLM模型）"""
+    if not vlm_available:
+        return "多模态模型未加载，无法提取图像文字"
+    
+    try:
+        # 检查模型类型并相应处理
+        model_type = type(vlm_model).__name__
         
-        # 调用 AI 生成学习情况分析
-        prompt = f"""<|im_start|>system
-你是一位教育专家，请根据学生的提问记录，分析该学生的学习情况。请简要总结学生的学习兴趣、知识薄弱点和建议。回答要简洁，不超过100字。
-<|im_end|>
-<|im_start|>user
-学生 {student_name} 的提问记录如下：
-{qa_text}
+        if "Blip" in model_type:
+            # BLIP模型处理
+            inputs = vlm_processor(image, return_tensors="pt").to(vlm_model.device)
+            out = vlm_model.generate(**inputs, max_new_tokens=100)
+            caption = vlm_processor.decode(out[0], skip_special_tokens=True)
+            return f"图像描述：{caption}"
+        elif "VisionEncoderDecoder" in model_type:
+            # ViT-GPT2模型处理
+            pixel_values = vlm_processor(images=image, return_tensors="pt").pixel_values.to(vlm_model.device)
+            generated_ids = vlm_model.generate(pixel_values, max_length=50)
+            generated_text = vlm_processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
+            return f"图像描述：{generated_text}"
+        else:
+            # 通用处理（尝试原始方法）
+            prompt = "请详细描述这张图片的内容，包括其中的文字、图表、公式等所有可见信息。"
+            inputs = vlm_processor(images=image, text=prompt, return_tensors="pt").to(vlm_model.device)
+            generated_ids = vlm_model.generate(**inputs, max_new_tokens=512)
+            generated_text = vlm_processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
+            return generated_text
+            
+    except Exception as e:
+        print(f"图像文字提取错误: {e}")
+        return f"图像处理失败: {str(e)}"
 
-请分析该学生的学习情况。
-<|im_end|>
-<|im_start|>assistant
-"""
+def analyze_image_with_question(image, question):
+    """使用VLM模型分析图像并回答问题"""
+    if not vlm_available:
+        return "多模态模型未加载，无法分析图像"
+    
+    try:
+        # 检查模型类型并相应处理
+        model_type = type(vlm_model).__name__
         
-        try:
-            inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
-            outputs = model.generate(
-                **inputs,
-                max_new_tokens=150,
-                temperature=0.7,
-                do_sample=True,
-                pad_token_id=tokenizer.eos_token_id
-            )
-            full_output = tokenizer.decode(outputs[0], skip_special_tokens=False)
+        if "Blip" in model_type:
+            # BLIP模型处理 - 使用条件生成
+            inputs = vlm_processor(image, text=question, return_tensors="pt").to(vlm_model.device)
+            out = vlm_model.generate(**inputs, max_new_tokens=100)
+            caption = vlm_processor.decode(out[0], skip_special_tokens=True)
+            return f"关于'{question}'的回答：{caption}"
+        elif "VisionEncoderDecoder" in model_type:
+            # ViT-GPT2模型主要用于图像描述，不支持问答
+            pixel_values = vlm_processor(images=image, return_tensors="pt").pixel_values.to(vlm_model.device)
+            generated_ids = vlm_model.generate(pixel_values, max_length=50)
+            generated_text = vlm_processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
+            return f"图像描述：{generated_text}\n\n关于问题'{question}'：该模型主要用于图像描述，无法直接回答问题。"
+        else:
+            # 通用处理
+            prompt = f"请根据图片内容回答以下问题：{question}\n请详细分析图片中的相关信息。"
+            inputs = vlm_processor(images=image, text=prompt, return_tensors="pt").to(vlm_model.device)
+            generated_ids = vlm_model.generate(**inputs, max_new_tokens=1024)
+            generated_text = vlm_processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
+            return generated_text
             
-            # 提取 assistant 的回复
-            summary = full_output
-            
-            # 方法1：找到最后一个 <|im_start|>assistant 之后的内容
-            if "<|im_start|>assistant" in full_output:
-                parts = full_output.split("<|im_start|>assistant")
-                if len(parts) > 1:
-                    summary = parts[-1]
-                    # 移除 <|im_end|> 标记
-                    if "<|im_end|>" in summary:
-                        summary = summary.split("<|im_end|>")[0]
-                    summary = summary.strip()
-            
-            # 方法2：如果方法1失败，尝试其他方式
-            if not summary or len(summary) < 10:
-                # 移除所有特殊标记后重新尝试
-                clean_output = full_output.replace('<|im_start|>', '').replace('<|im_end|>', '')
-                clean_output = clean_output.replace('', '')
-                
-                # 移除 system 和 user 部分
-                if "system" in clean_output:
-                    clean_output = clean_output.split("system")[0]
-                if "user" in clean_output:
-                    clean_output = clean_output.split("user")[0]
-                
-                # 提取 assistant 之后的内容
-                if "assistant" in clean_output:
-                    clean_output = clean_output.split("assistant")[-1]
-                
-                summary = clean_output.strip()
-            
-            # 方法3：如果还是失败，取最后一段有意义的文本
-            if not summary or len(summary) < 10:
-                lines = full_output.replace('<|im_start|>', '\n').replace('<|im_end|>', '\n')
-                lines = lines.split('\n')
-                for line in reversed(lines):
-                    line = line.strip()
-                    if line and len(line) > 10 and not line.startswith('<|') and 'system' not in line.lower() and 'user' not in line.lower():
-                        summary = line
-                        break
-            
-            student_summaries[student_name] = summary if summary and len(summary) >= 10 else f"该学生共提问 {len(qa_list)} 次"
-            
-            # 存储到数据库
-            if student_user:
-                student_user.learning_summary = student_summaries[student_name]
-                student_user.summary_updated_at = datetime.utcnow()
-                db.session.commit()
-                
-        except Exception as e:
-            print(f"生成学习情况分析失败: {e}")
-            student_summaries[student_name] = f"该学生共提问 {len(qa_list)} 次"
-    
-    # 生成总体 AI 总结
-    overall_summary = f"共有 {total_questions} 个问题，来自 {len(questions_by_student)} 位学生。"
-    
-    return flask.jsonify({
-        "total_questions": total_questions,
-        "questions_by_student": questions_by_student,
-        "student_summaries": student_summaries,
-        "summary": overall_summary
-    }), 200
+    except Exception as e:
+        print(f"图像分析错误: {e}")
+        return f"图像分析失败: {str(e)}"
 
-@app.route("/api/questions/pending", methods=["GET"])
-@login_required
-def get_pending_questions():
-    """获取所有学生的问题，方便老师查看并提供权威回复"""
-    if current_user.role != 'teacher':
-        return flask.jsonify({"error": "Permission denied"}), 403
-    
-    questions = Question.query.order_by(Question.timestamp.desc()).all()
-    result = []
-    for q in questions:
-        student = db.session.get(User, q.student_id)
-        result.append({
-            "id": q.id,
-            "content": q.content,
-            "ai_answer": q.answer,
-            "authoritative_answer": q.authoritative_answer,
-            "student_name": student.username if student else "Unknown",
-            "timestamp": q.timestamp.isoformat()
-        })
-    return flask.jsonify(result), 200
-
-@app.route("/api/questions/<int:q_id>/authoritative", methods=["POST"])
-@login_required
-def set_authoritative_answer(q_id):
-    """老师针对某个问题提供权威答案"""
-    if current_user.role != 'teacher':
-        return flask.jsonify({"error": "Permission denied"}), 403
-    
-    data = flask.request.json
-    if not data or 'answer' not in data:
-        return flask.jsonify({"error": "Missing answer content"}), 400
-    
-    question = db.session.get(Question, q_id)
-    if not question:
-        return flask.jsonify({"error": "Question not found"}), 404
-    
-    question.authoritative_answer = data['answer']
-    question.teacher_id = current_user.id
-    db.session.commit()
-    
-    return flask.jsonify({"message": "Authoritative answer updated. AI will now prioritize this info."}), 200
-
-# ========================== AI 问答接口 ==========================
-@app.route("/api/qa", methods=["POST"])
-@login_required
-@rate_limit(limit=10, window=60)
-def qa():
-    data = flask.request.json
-    query = data.get('question')
-    if not query: return flask.jsonify({"error": "问题不能为空"}), 400
-    
-    query = sanitize_input(query, max_length=1000)
-    history = get_history(current_user.id)
-
-    def generate_search_queries(query, history):
-        """
-        让 AI 根据当前问题和历史记录，生成最适合搜索的 1-3 个关键词
-        """
-        prompt = f"""<|im_start|>system
+def generate_search_queries(query, history):
+    """
+    让 AI 根据当前问题和历史记录，生成最适合搜索的 1-3 个关键词
+    """
+    prompt = f"""<|im_start|>system
 你是一个搜索优化专家。请根据用户的提问和对话历史，提取出最适合在知识库中搜索的关键词。
 要求：
 1. 除去语气词，保留核心学术/技术名词。
@@ -683,13 +568,170 @@ def qa():
 生成搜索词：<|im_end|>
 <|im_start|>assistant
 """
-        inputs = tokenizer(prompt, return_tensors="pt").to(DEVICE)
-        outputs = model.generate(**inputs, max_new_tokens=50, temperature=0.1)
-        refined_queries = tokenizer.decode(outputs[0][inputs.input_ids.shape[1]:], skip_special_tokens=True).strip()
+    inputs = tokenizer(prompt, return_tensors="pt").to(DEVICE)
+    outputs = model.generate(**inputs, max_new_tokens=50, temperature=0.1)
+    refined_queries = tokenizer.decode(outputs[0][inputs.input_ids.shape[1]:], skip_special_tokens=True).strip()
+
+    # 将生成的字符串拆分为列表，例如 "微积分, 牛顿莱布尼茨公式" -> ["微积分", "牛顿莱布尼茨公式"]
+    query_list = [q.strip() for q in refined_queries.split(',')]
+    return query_list
+
+# ========================== 多模态图像问答接口 ==========================
+@app.route("/api/multimodal/qa", methods=["POST"])
+@login_required
+@rate_limit(limit=10, window=60)
+def multimodal_qa():
+    """多模态问答接口，支持图像+文本"""
+    data = flask.request.json
+    query = data.get('question')
+    image_base64 = data.get('image')
     
-        # 将生成的字符串拆分为列表，例如 "微积分, 牛顿莱布尼茨公式" -> ["微积分", "牛顿莱布尼茨公式"]
-        query_list = [q.strip() for q in refined_queries.split(',')]
-        return query_list
+    if not query and not image_base64:
+        return flask.jsonify({"error": "问题或图像不能为空"}), 400
+    
+    query = sanitize_input(query, max_length=1000) if query else ""
+    
+    def generate():
+        try:
+            image_analysis = ""
+            
+            # 如果有图像，先处理图像
+            if image_base64:
+                image = process_image_base64(image_base64)
+                if image:
+                    if query:
+                        # 图像+问题：视觉问答
+                        image_analysis = analyze_image_with_question(image, query)
+                    else:
+                        # 只有图像：图像描述
+                        image_analysis = extract_text_from_image(image)
+            
+            # 构建最终回答
+            if image_analysis and not image_analysis.startswith("多模态模型未加载"):
+                # 使用VLM模型的回答
+                full_answer = image_analysis
+            else:
+                # 回退到纯文本问答
+                if query:
+                    history = get_history(current_user.id)
+                    
+                    # 生成搜索查询
+                    search_keywords = generate_search_queries(query, history)
+                    
+                    # 检索相关文档
+                    retrieved_context = ""
+                    if retriever:
+                        context_list = []
+                        for kw in search_keywords:
+                            docs = retriever.invoke(kw)
+                            context_list.extend([d.page_content for d in docs])
+                        
+                        if context_list:
+                            retrieved_context = "\n【本地文件参考】:\n" + "\n---\n".join(list(set(context_list)))
+                    
+                    # 权威知识检索
+                    auth_context = find_authoritative_knowledge(query)
+                    if auth_context:
+                        retrieved_context += auth_context
+                    
+                    # 工具调用
+                    tool_result = check_and_run_tools(query)
+                    if tool_result:
+                        retrieved_context += tool_result
+                    
+                    # 生成最终回答
+                    system_prompt = "你是学习助手。请根据以下检索到的资料和对话历史回答用户。"
+                    full_prompt = (
+                        f"<|im_start|>system\n{system_prompt}\n\n"
+                        f"【检索到的资料】:\n{retrieved_context if retrieved_context else '无需外部资料'}\n\n"
+                        f"【对话历史记录】:\n{history}<|im_end|>\n"
+                        f"<|im_start|>user\n{query}<|im_end|>\n"
+                        f"<|im_start|>assistant\n"
+                    )
+                    
+                    inputs = tokenizer(full_prompt, return_tensors="pt").to(DEVICE)
+                    outputs = model.generate(**inputs, max_new_tokens=1024, temperature=0.7, do_sample=True)
+                    full_answer = tokenizer.decode(outputs[0][inputs.input_ids.shape[1]:], skip_special_tokens=True)
+                else:
+                    full_answer = "请提供问题或图像进行分析"
+            
+            # 流式输出
+            for char in full_answer:
+                yield f"data: {json.dumps({'token': char})}\n\n"
+                import time
+                time.sleep(0.01)  # 控制流式输出速度
+            
+            # 保存到数据库
+            with app.app_context():
+                new_record = Question(
+                    content=f"[多模态] {query[:50]}..." if query else "[图像分析]",
+                    answer=full_answer.strip(),
+                    student_id=current_user.id
+                )
+                db.session.add(new_record)
+                db.session.commit()
+                
+        except Exception as e:
+            print(f"多模态问答错误: {e}")
+            yield f"data: {json.dumps({'token': '处理失败，请重试。'})}\n\n"
+    
+    response = Response(stream_with_context(generate()), mimetype='text/event-stream')
+    response.headers.update({'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no', 'Connection': 'keep-alive'})
+    return response
+
+# ========================== 图像上传接口 ==========================
+@app.route("/api/upload/image", methods=["POST"])
+@login_required
+@rate_limit(limit=5, window=60)
+def upload_image():
+    """上传图像并返回分析结果"""
+    try:
+        if 'image' not in flask.request.files:
+            return flask.jsonify({"error": "没有上传文件"}), 400
+        
+        file = flask.request.files['image']
+        
+        # 检查文件类型
+        allowed_extensions = {'png', 'jpg', 'jpeg', 'gif', 'bmp'}
+        if '.' not in file.filename or file.filename.rsplit('.', 1)[1].lower() not in allowed_extensions:
+            return flask.jsonify({"error": "不支持的文件类型"}), 400
+        
+        # 读取图像
+        image_data = file.read()
+        image = Image.open(io.BytesIO(image_data))
+        
+        # 转换为base64
+        buffered = io.BytesIO()
+        image.save(buffered, format="PNG")
+        img_str = base64.b64encode(buffered.getvalue()).decode()
+        
+        # 分析图像
+        analysis = ""
+        if vlm_available:
+            analysis = extract_text_from_image(image)
+        
+        return flask.jsonify({
+            "success": True,
+            "image_base64": f"data:image/png;base64,{img_str}",
+            "analysis": analysis,
+            "message": "图像上传成功"
+        }), 200
+        
+    except Exception as e:
+        print(f"图像上传错误: {e}")
+        return flask.jsonify({"error": f"图像处理失败: {str(e)}"}), 500
+
+# ========================== AI 问答接口 ==========================
+@app.route("/api/qa", methods=["POST"])
+@login_required
+@rate_limit(limit=10, window=60)
+def qa():
+    data = flask.request.json
+    query = data.get('question')
+    if not query: return flask.jsonify({"error": "问题不能为空"}), 400
+    
+    query = sanitize_input(query, max_length=1000)
+    history = get_history(current_user.id)
 
     # ========================== 阶段 1：主动决策 ==========================
     # 告诉模型它有哪些“技能”，让它决定用哪个
@@ -893,6 +935,369 @@ def add_security_headers(response):
         response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
     
     return response
+
+# ========================== 用户认证接口 ==========================
+
+@app.route("/api/auth/register", methods=["POST"])
+@rate_limit(limit=5, window=300)  # 5分钟内最多5次注册
+def register():
+    """用户注册接口"""
+    data = flask.request.json
+    if not data:
+        return flask.jsonify({"error": "请求数据不能为空"}), 400
+    
+    username = data.get('username')
+    email = data.get('email')
+    password = data.get('password')
+    role = data.get('role', 'student')  # 默认学生
+    
+    # 验证必填字段
+    if not username or not email or not password:
+        return flask.jsonify({"error": "用户名、邮箱和密码不能为空"}), 400
+    
+    # 验证角色
+    if role not in ['student', 'teacher']:
+        return flask.jsonify({"error": "角色必须是 'student' 或 'teacher'"}), 400
+    
+    # 验证用户名格式
+    if len(username) < 3 or len(username) > 20:
+        return flask.jsonify({"error": "用户名长度必须在3-20个字符之间"}), 400
+    if not re.match(r'^[a-zA-Z0-9_]+$', username):
+        return flask.jsonify({"error": "用户名只能包含字母、数字和下划线"}), 400
+    
+    # 验证邮箱格式
+    email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    if not re.match(email_pattern, email):
+        return flask.jsonify({"error": "邮箱格式不正确"}), 400
+    
+    # 检查密码强度
+    is_strong, message = is_strong_password(password)
+    if not is_strong:
+        return flask.jsonify({"error": message}), 400
+    
+    # 检查用户名和邮箱是否已存在
+    existing_user = User.query.filter((User.username == username) | (User.email == email)).first()
+    if existing_user:
+        if existing_user.username == username:
+            return flask.jsonify({"error": "用户名已存在"}), 409
+        else:
+            return flask.jsonify({"error": "邮箱已存在"}), 409
+    
+    try:
+        # 哈希密码
+        hashed_password = bcrypt.generate_password_hash(password).decode('utf-8')
+        
+        # 创建新用户
+        new_user = User(
+            username=username,
+            email=email,
+            password=hashed_password,
+            role=role
+        )
+        
+        db.session.add(new_user)
+        db.session.commit()
+        
+        # 自动登录
+        login_user(new_user, remember=True)
+        
+        return flask.jsonify({
+            "message": "注册成功",
+            "user": {
+                "id": new_user.id,
+                "username": new_user.username,
+                "email": new_user.email,
+                "role": new_user.role
+            }
+        }), 201
+        
+    except Exception as e:
+        db.session.rollback()
+        print(f"注册错误: {e}")
+        return flask.jsonify({"error": "注册失败，请稍后重试"}), 500
+
+@app.route("/api/register", methods=["POST"])
+@rate_limit(limit=5, window=300)  # 5分钟内最多5次注册
+def register_legacy():
+    """用户注册接口（兼容旧版前端）"""
+    data = flask.request.json
+    if not data:
+        return flask.jsonify({"error": "请求数据不能为空"}), 400
+    
+    username = data.get('username')
+    email = data.get('email')
+    password = data.get('password')
+    role = data.get('role', 'student')  # 默认学生
+    
+    # 验证必填字段
+    if not username or not email or not password:
+        return flask.jsonify({"error": "用户名、邮箱和密码不能为空"}), 400
+    
+    # 验证角色
+    if role not in ['student', 'teacher']:
+        return flask.jsonify({"error": "角色必须是 'student' 或 'teacher'"}), 400
+    
+    # 验证用户名格式
+    if len(username) < 3 or len(username) > 20:
+        return flask.jsonify({"error": "用户名长度必须在3-20个字符之间"}), 400
+    if not re.match(r'^[a-zA-Z0-9_]+$', username):
+        return flask.jsonify({"error": "用户名只能包含字母、数字和下划线"}), 400
+    
+    # 验证邮箱格式
+    email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    if not re.match(email_pattern, email):
+        return flask.jsonify({"error": "邮箱格式不正确"}), 400
+    
+    # 检查密码强度
+    is_strong, message = is_strong_password(password)
+    if not is_strong:
+        return flask.jsonify({"error": message}), 400
+    
+    # 检查用户名和邮箱是否已存在
+    existing_user = User.query.filter((User.username == username) | (User.email == email)).first()
+    if existing_user:
+        if existing_user.username == username:
+            return flask.jsonify({"error": "用户名已存在"}), 409
+        else:
+            return flask.jsonify({"error": "邮箱已存在"}), 409
+    
+    try:
+        # 哈希密码
+        hashed_password = bcrypt.generate_password_hash(password).decode('utf-8')
+        
+        # 创建新用户
+        new_user = User(
+            username=username,
+            email=email,
+            password=hashed_password,
+            role=role
+        )
+        
+        db.session.add(new_user)
+        db.session.commit()
+        
+        # 自动登录
+        login_user(new_user, remember=True)
+        
+        return flask.jsonify({
+            "message": "注册成功",
+            "user": {
+                "id": new_user.id,
+                "username": new_user.username,
+                "email": new_user.email,
+                "role": new_user.role
+            }
+        }), 201
+        
+    except Exception as e:
+        db.session.rollback()
+        print(f"注册错误: {e}")
+        return flask.jsonify({"error": "注册失败，请稍后重试"}), 500
+
+@app.route("/api/auth/login", methods=["POST"])
+@rate_limit(limit=10, window=300)  # 5分钟内最多10次登录尝试
+def login():
+    """用户登录接口"""
+    data = flask.request.json
+    if not data:
+        return flask.jsonify({"error": "请求数据不能为空"}), 400
+    
+    username = data.get('username')
+    password = data.get('password')
+    remember = data.get('remember', True)
+    
+    if not username or not password:
+        return flask.jsonify({"error": "用户名和密码不能为空"}), 400
+    
+    # 查找用户（支持用户名或邮箱登录）
+    user = User.query.filter((User.username == username) | (User.email == username)).first()
+    
+    if not user:
+        return flask.jsonify({"error": "用户名或密码错误"}), 401
+    
+    # 验证密码
+    if not bcrypt.check_password_hash(user.password, password):
+        return flask.jsonify({"error": "用户名或密码错误"}), 401
+    
+    # 登录用户
+    login_user(user, remember=remember)
+    
+    return flask.jsonify({
+        "message": "登录成功",
+        "user": {
+            "id": user.id,
+            "username": user.username,
+            "email": user.email,
+            "role": user.role
+        }
+    }), 200
+
+@app.route("/api/login", methods=["POST"])
+@rate_limit(limit=10, window=300)  # 5分钟内最多10次登录尝试
+def login_legacy():
+    """用户登录接口（兼容旧版前端）"""
+    data = flask.request.json
+    if not data:
+        return flask.jsonify({"error": "请求数据不能为空"}), 400
+    
+    # 旧版前端使用email字段，新版使用username字段
+    email = data.get('email')
+    password = data.get('password')
+    remember = data.get('remember', True)
+    
+    if not email or not password:
+        return flask.jsonify({"error": "邮箱和密码不能为空"}), 400
+    
+    # 查找用户（使用邮箱登录）
+    user = User.query.filter_by(email=email).first()
+    
+    if not user:
+        return flask.jsonify({"error": "邮箱或密码错误"}), 401
+    
+    # 验证密码
+    if not bcrypt.check_password_hash(user.password, password):
+        return flask.jsonify({"error": "邮箱或密码错误"}), 401
+    
+    # 登录用户
+    login_user(user, remember=remember)
+    
+    return flask.jsonify({
+        "message": "登录成功",
+        "user": {
+            "id": user.id,
+            "username": user.username,
+            "email": user.email,
+            "role": user.role
+        }
+    }), 200
+
+@app.route("/api/auth/logout", methods=["POST"])
+@login_required
+def logout():
+    """用户登出接口"""
+    logout_user()
+    return flask.jsonify({"message": "登出成功"}), 200
+
+@app.route("/api/auth/me", methods=["GET"])
+@login_required
+def get_current_user_info():
+    """获取当前用户信息"""
+    return flask.jsonify({
+        "id": current_user.id,
+        "username": current_user.username,
+        "email": current_user.email,
+        "role": current_user.role,
+        "learning_summary": current_user.learning_summary,
+        "summary_updated_at": current_user.summary_updated_at.isoformat() if current_user.summary_updated_at else None
+    }), 200
+
+@app.route("/api/auth/check", methods=["GET"])
+def check_auth():
+    """检查用户是否已登录"""
+    if current_user.is_authenticated:
+        return flask.jsonify({
+            "authenticated": True,
+            "user": {
+                "id": current_user.id,
+                "username": current_user.username,
+                "email": current_user.email,
+                "role": current_user.role
+            }
+        }), 200
+    else:
+        return flask.jsonify({"authenticated": False}), 200
+
+@app.route("/api/check-auth", methods=["GET"])
+def check_auth_legacy():
+    """检查用户是否已登录（兼容旧版前端）"""
+    if current_user.is_authenticated:
+        return flask.jsonify({
+            "authenticated": True,
+            "user": {
+                "id": current_user.id,
+                "username": current_user.username,
+                "email": current_user.email,
+                "role": current_user.role
+            }
+        }), 200
+    else:
+        return flask.jsonify({"authenticated": False}), 200
+
+# ========================== 老师管理接口 ==========================
+
+@app.route("/api/questions/pending", methods=["GET"])
+@login_required
+def get_pending_questions():
+    """获取待处理问题列表（仅老师）"""
+    if current_user.role != 'teacher':
+        return flask.jsonify({"error": "权限不足"}), 403
+    
+    # 获取所有问题，包括AI回答和权威答案
+    questions = Question.query.order_by(Question.timestamp.desc()).all()
+    
+    result = []
+    for q in questions:
+        student = db.session.get(User, q.student_id)
+        teacher = db.session.get(User, q.teacher_id) if q.teacher_id else None
+        
+        result.append({
+            "id": q.id,
+            "content": q.content,
+            "ai_answer": q.answer,
+            "authoritative_answer": q.authoritative_answer,
+            "student_name": student.username if student else "未知学生",
+            "teacher_name": teacher.username if teacher else None,
+            "timestamp": q.timestamp.isoformat(),
+            "has_authoritative": q.authoritative_answer is not None
+        })
+    
+    return flask.jsonify(result), 200
+
+@app.route("/api/questions/<int:q_id>/authoritative", methods=["POST"])
+@login_required
+def submit_authoritative_answer(q_id):
+    """提交权威答案（仅老师）"""
+    if current_user.role != 'teacher':
+        return flask.jsonify({"error": "权限不足"}), 403
+    
+    data = flask.request.json
+    if not data or 'answer' not in data:
+        return flask.jsonify({"error": "缺少答案内容"}), 400
+    
+    answer = sanitize_input(data['answer'], max_length=2000)
+    if not answer or len(answer.strip()) < 1:
+        return flask.jsonify({"error": "答案内容不能为空"}), 400
+    
+    question = db.session.get(Question, q_id)
+    if not question:
+        return flask.jsonify({"error": "问题不存在"}), 404
+    
+    # 更新权威答案
+    question.authoritative_answer = answer
+    question.teacher_id = current_user.id
+    db.session.commit()
+    
+    return flask.jsonify({
+        "message": "权威答案已提交",
+        "question_id": q_id,
+        "teacher_id": current_user.id
+    }), 200
+
+@app.route("/api/questions/<int:q_id>", methods=["DELETE"])
+@login_required
+def delete_question(q_id):
+    """删除问题（仅老师）"""
+    if current_user.role != 'teacher':
+        return flask.jsonify({"error": "权限不足"}), 403
+    
+    question = db.session.get(Question, q_id)
+    if not question:
+        return flask.jsonify({"error": "问题不存在"}), 404
+    
+    db.session.delete(question)
+    db.session.commit()
+    
+    return flask.jsonify({"message": "问题已删除"}), 200
 
 if __name__ == "__main__":
     app.run(debug=False, port=5000, threaded=True)

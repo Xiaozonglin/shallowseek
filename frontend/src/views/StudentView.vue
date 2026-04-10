@@ -6,24 +6,63 @@
         <a-col :xs="24" :md="16">
           <a-card title="向AI提问" class="qa-section">
             <a-form layout="vertical">
-              <a-form-item>
-                <a-textarea
-                  v-model:value="question"
-                  placeholder="请输入您的问题，例如：什么是加法？"
-                  :rows="4"
-                />
-              </a-form-item>
-              <a-form-item>
-                <a-button 
-                  type="primary" 
-                  block
-                  @click="submitQuestion" 
-                  :disabled="!question.trim() || loading"
-                  :loading="loading"
-                >
-                  {{ loading ? '思考中...' : '提问' }}
-                </a-button>
-              </a-form-item>
+               <a-form-item>
+                 <a-textarea
+                   v-model:value="question"
+                   placeholder="请输入您的问题，例如：什么是加法？或者上传图片进行视觉问答"
+                   :rows="4"
+                 />
+               </a-form-item>
+               
+               <!-- 新增：图像上传区域 -->
+               <a-form-item>
+                 <div class="image-upload-section">
+                   <a-upload
+                     :before-upload="handleImageUpload"
+                     :show-upload-list="false"
+                     accept=".png,.jpg,.jpeg,.gif,.bmp"
+                   >
+                     <a-button>
+                       <template #icon><upload-outlined /></template>
+                       上传图片
+                     </a-button>
+                   </a-upload>
+                   
+                   <div v-if="uploadedImage" class="image-preview">
+                     <img :src="uploadedImage" alt="上传的图片" />
+                     <a-button 
+                       type="link" 
+                       danger 
+                       @click="removeImage"
+                       size="small"
+                     >
+                       移除
+                     </a-button>
+                   </div>
+                 </div>
+               </a-form-item>
+               
+               <a-form-item>
+                 <a-space>
+                   <a-button 
+                     type="primary" 
+                     @click="submitQuestion" 
+                     :disabled="(!question.trim() && !uploadedImage) || loading"
+                     :loading="loading"
+                   >
+                     {{ loading ? '思考中...' : '提问' }}
+                   </a-button>
+                   
+                   <a-button 
+                     v-if="uploadedImage && !question.trim()"
+                     type="dashed"
+                     @click="analyzeImageOnly"
+                     :loading="loading"
+                   >
+                     仅分析图片
+                   </a-button>
+                 </a-space>
+               </a-form-item>
             </a-form>
 
             <!-- 答案显示区域 -->
@@ -172,6 +211,7 @@ import axios from 'axios'
 import { marked } from 'marked'
 import katex from 'katex'
 import 'katex/dist/katex.min.css'
+import { UploadOutlined } from '@ant-design/icons-vue'
 
 export default {
   name: 'StudentView',
@@ -187,6 +227,8 @@ export default {
     const messageToTeacher = ref('');
     const sendingMessage = ref(false);
     const messageSuccess = ref(false);
+    const uploadedImage = ref(''); // 新增：上传的图片base64
+    const imageFile = ref(null); // 新增：图片文件对象
 
     marked.setOptions({
       breaks: true,
@@ -264,6 +306,92 @@ export default {
       return marked(withLatex)
     }
 
+    // 新增：图像上传处理
+    const handleImageUpload = (file) => {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader()
+        reader.onload = (e) => {
+          uploadedImage.value = e.target.result
+          imageFile.value = file
+          resolve(false) // 返回false阻止自动上传
+        }
+        reader.onerror = reject
+        reader.readAsDataURL(file)
+      })
+    }
+
+    // 移除图片
+    const removeImage = () => {
+      uploadedImage.value = ''
+      imageFile.value = null
+    }
+
+    // 仅分析图片
+    const analyzeImageOnly = async () => {
+      if (!uploadedImage.value) return
+      
+      loading.value = true
+      answer.value = ''
+      streamingAnswer.value = ''
+      
+      try {
+        const response = await fetch('/api/multimodal/qa', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ 
+            image: uploadedImage.value.split(',')[1] // 移除data:image前缀
+          }),
+          credentials: 'include'
+        })
+
+        if (!response.ok || !response.body) {
+          throw new Error(`HTTP error! status: ${response.status}`)
+        }
+
+        const reader = response.body.getReader()
+        const decoder = new TextDecoder()
+
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+
+          const chunk = decoder.decode(value)
+          const lines = chunk.split('\n')
+
+          for (const line of lines) {
+            if (line.startsWith('data: ')) {
+              try {
+                const data = JSON.parse(line.slice(6))
+                if (data.token) {
+                  let token = data.token
+                    .replace(/<\|im_end\|>/g, '')
+                    .replace(/<\|im_start\|>/g, '')
+                  if (token) {
+                    streamingAnswer.value += token
+                  }
+                }
+              } catch (e) {
+                console.warn('解析流数据失败:', e, line)
+              }
+            }
+          }
+        }
+
+        answer.value = streamingAnswer.value
+        history.value.unshift({
+          question: '[图片分析]',
+          answer: streamingAnswer.value
+        })
+
+      } catch (error) {
+        console.error('图片分析失败:', error)
+        alert('图片分析失败，请检查网络连接。')
+      } finally {
+        loading.value = false
+        streamingAnswer.value = ''
+      }
+    }
+
     // 新增：登出方法
     const logout = async () => {
       try {
@@ -278,19 +406,27 @@ export default {
       }
     }
 
-    // 提交问题
+    // 提交问题（支持多模态）
     const submitQuestion = async () => {
-      if (!question.value.trim()) return;
+      if (!question.value.trim() && !uploadedImage.value) return;
 
       loading.value = true;
       answer.value = '';
       streamingAnswer.value = ''; // 清空实时流
 
       try {
-        const response = await fetch('/api/qa', {
+        const apiEndpoint = uploadedImage.value ? '/api/multimodal/qa' : '/api/qa'
+        const requestBody = uploadedImage.value ? {
+          question: question.value,
+          image: uploadedImage.value.split(',')[1] // 移除data:image前缀
+        } : {
+          question: question.value
+        }
+
+        const response = await fetch(apiEndpoint, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ question: question.value }),
+          body: JSON.stringify(requestBody),
           credentials: 'include' // 重要：确保发送 Cookie
         });
 
@@ -331,10 +467,11 @@ export default {
         // 流结束后，将最终结果存入 answer 和历史记录
         answer.value = streamingAnswer.value;
         history.value.unshift({
-          question: question.value,
+          question: question.value || '[图片分析]',
           answer: streamingAnswer.value
         });
         question.value = '';
+        removeImage(); // 清空上传的图片
 
       } catch (error) {
         console.error('提问失败:', error);
@@ -415,20 +552,25 @@ export default {
     return {
       question,
       answer,
-      streamingAnswer,  // 新增：返回streamingAnswer变量
+      streamingAnswer,
       sources,
       loading,
       history,
-      messages, // 新增：返回留言历史
+      messages,
       messageToTeacher,
       sendingMessage,
       messageSuccess,
-      logout,  // 新增：返回 logout 方法
+      uploadedImage,
+      UploadOutlined,
+      logout,
       submitQuestion,
       sendMessageToTeacher,
+      handleImageUpload,
+      removeImage,
+      analyzeImageOnly,
       renderedAnswer,
       renderedStreamingAnswer,
-      renderHistoryAnswer  // 新增：返回历史答案渲染方法
+      renderHistoryAnswer
     }
   }
 }
@@ -532,6 +674,27 @@ export default {
   font-size: 14px;
   line-height: 1.6;
   color: #e0e0e0;
+}
+
+/* 图像上传区域样式 */
+.image-upload-section {
+  margin-bottom: 16px;
+}
+
+.image-preview {
+  margin-top: 12px;
+  padding: 12px;
+  background: #1a1a1a;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.image-preview img {
+  max-width: 100%;
+  max-height: 200px;
+  border-radius: 4px;
+  margin-bottom: 8px;
+  display: block;
 }
 
 /* Markdown渲染样式 - 暗色主题 */
