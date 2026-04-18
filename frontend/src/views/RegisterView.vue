@@ -1,59 +1,88 @@
 <template>
-  <div class="register-container">
-    <a-card title="注册新账户" class="register-card">
-      <a-form :model="form" @submit.prevent="handleRegister" layout="vertical">
-        <a-form-item label="用户名" :rules="[{ required: true, message: '请输入用户名' }]">
-          <a-input v-model:value="form.username" placeholder="请输入用户名" />
-        </a-form-item>
-        
-        <a-form-item label="邮箱" :rules="[{ required: true, message: '请输入邮箱' }, { type: 'email', message: '请输入有效的邮箱地址' }]">
-          <a-input v-model:value="form.email" placeholder="请输入邮箱地址" />
-        </a-form-item>
-        
-        <a-form-item label="密码" :rules="[{ required: true, message: '请输入密码' }]">
-          <a-input-password v-model:value="form.password" placeholder="请输入密码" />
-        </a-form-item>
-        
-        <a-form-item label="确认密码" :rules="[{ required: true, message: '请再次输入密码' }]">
-          <a-input-password v-model:value="form.confirmPassword" placeholder="请再次输入密码" />
-        </a-form-item>
-        
-        <a-form-item label="注册身份" :rules="[{ required: true, message: '请选择角色' }]">
-          <div class="role-selector">
+  <section class="register-shell">
+    <div class="register-orb register-orb-left"></div>
+    <div class="register-orb register-orb-right"></div>
+
+    <div class="register-wrap">
+      <div class="register-copy">
+        <div class="copy-badge">Create Account</div>
+        <h1>创建一个更纯粹的学习入口。</h1>
+        <p>
+          注册后即可使用智能问答、教师留言与学习记录管理。
+        </p>
+      </div>
+
+      <a-card class="surface-card register-card">
+        <template #title>
+          <div class="register-card-title">
+            <span>注册账号</span>
+            <small>填写基础信息后即可开始使用</small>
+          </div>
+        </template>
+
+        <a-form :model="form" layout="vertical" @submit.prevent="handleRegister">
+          <a-form-item label="用户名">
+            <a-input v-model:value="form.username" placeholder="请输入用户名" />
+          </a-form-item>
+
+          <a-form-item label="邮箱">
+            <a-input v-model:value="form.email" placeholder="请输入邮箱地址" />
+          </a-form-item>
+
+          <a-form-item label="密码">
+            <a-input-password v-model:value="form.password" placeholder="请输入密码" />
+          </a-form-item>
+
+          <a-form-item label="确认密码">
+            <a-input-password v-model:value="form.confirmPassword" placeholder="请再次输入密码" />
+          </a-form-item>
+
+          <a-form-item label="注册身份">
             <a-radio-group v-model:value="form.role">
-              <a-radio-button value="student">学生</a-radio-button>
-              <a-radio-button value="teacher">老师</a-radio-button>
+              <a-radio-button value="student">学生端</a-radio-button>
+              <a-radio-button value="teacher">教师端</a-radio-button>
             </a-radio-group>
+          </a-form-item>
+
+          <a-alert
+            v-if="errorMessage"
+            type="error"
+            message="注册失败"
+            :description="errorMessage"
+            show-icon
+            class="register-alert"
+          />
+
+          <a-alert
+            v-if="successMessage"
+            type="success"
+            message="注册成功"
+            :description="successMessage"
+            show-icon
+            class="register-alert"
+          />
+
+          <a-form-item class="register-submit">
+            <a-button type="primary" html-type="submit" :loading="loading" block>
+              {{ loading ? '注册中...' : '完成注册' }}
+            </a-button>
+          </a-form-item>
+
+          <div class="register-footer">
+            <span>已有账号？</span>
+            <a href="#" @click.prevent="goToLogin">返回登录</a>
           </div>
-        </a-form-item>
-        
-        <!-- 错误信息显示 -->
-        <a-alert v-if="errorMessage" type="error" message="注册失败" :description="errorMessage" show-icon style="margin-bottom: 16px;" />
-        
-        <!-- 成功信息显示 -->
-        <a-alert v-if="successMessage" type="success" message="注册成功" :description="successMessage" show-icon style="margin-bottom: 16px;" />
-        
-        <a-form-item>
-          <a-button type="primary" html-type="submit" :loading="loading" block size="large">
-            {{ loading ? '注册中...' : '注册' }}
-          </a-button>
-        </a-form-item>
-        
-        <a-form-item>
-          <div class="login-link">
-            已有账号？<a href="#" @click="goToLogin">立即登录</a>
-          </div>
-        </a-form-item>
-      </a-form>
-    </a-card>
-  </div>
+        </a-form>
+      </a-card>
+    </div>
+  </section>
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import axios from 'axios'
-import { Card, Form, Input, Button, Radio, Alert, Space, message } from 'ant-design-vue'
+import { message } from 'ant-design-vue'
 
 const router = useRouter()
 const form = ref({
@@ -72,11 +101,7 @@ const checkAuth = async () => {
     const response = await axios.get('/api/check-auth')
     if (response.data.authenticated) {
       const userRole = response.data.user.role
-      if (userRole === 'student') {
-        router.push('/student')
-      } else if (userRole === 'teacher') {
-        router.push('/teacher')
-      }
+      router.push(userRole === 'teacher' ? '/teacher' : '/student')
     }
   } catch (error) {
     console.error('检查登录状态失败:', error)
@@ -90,33 +115,33 @@ onMounted(() => {
 const handleRegister = async () => {
   if (form.value.password !== form.value.confirmPassword) {
     errorMessage.value = '两次输入的密码不一致'
+    successMessage.value = ''
     return
   }
-  
+
   errorMessage.value = ''
   successMessage.value = ''
   loading.value = true
-  
+
   try {
-    const response = await axios.post('/api/register', {
+    await axios.post('/api/register', {
       username: form.value.username,
       email: form.value.email,
       password: form.value.password,
       role: form.value.role
     })
-    
-    successMessage.value = '注册成功！正在跳转到登录页面...'
+
+    successMessage.value = '注册成功，正在跳转到登录页面...'
     message.success('注册成功')
-    
+
     setTimeout(() => {
       router.push('/login')
-    }, 2000)
-    
+    }, 1800)
   } catch (error) {
     if (error.response) {
-      errorMessage.value = error.response.data.error || '注册失败'
+      errorMessage.value = error.response.data.error || '注册失败，请稍后再试'
     } else {
-      errorMessage.value = '网络错误，请检查后端是否运行'
+      errorMessage.value = '网络异常，请确认后端服务已启动'
     }
     console.error('注册错误:', error)
   } finally {
@@ -130,200 +155,180 @@ const goToLogin = () => {
 </script>
 
 <style scoped>
-.register-container {
-  display: flex;
-  justify-content: center;
-  align-items: center;
+.register-shell {
+  position: relative;
   min-height: 100vh;
-  background: #0a0a0a;
-  padding: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 32px 24px;
+  overflow: hidden;
+}
+
+.register-orb {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(90px);
+  pointer-events: none;
+}
+
+.register-orb-left {
+  top: 12%;
+  left: 10%;
+  width: 220px;
+  height: 220px;
+  background: rgba(255, 255, 255, 0.1);
+  animation: regFloatA 12s ease-in-out infinite;
+}
+
+.register-orb-right {
+  right: 10%;
+  bottom: 10%;
+  width: 300px;
+  height: 300px;
+  background: rgba(255, 255, 255, 0.07);
+  animation: regFloatB 14s ease-in-out infinite;
+}
+
+.register-wrap {
+  position: relative;
+  z-index: 1;
+  width: min(1120px, 100%);
+  display: grid;
+  grid-template-columns: minmax(0, 0.95fr) minmax(400px, 500px);
+  gap: 36px;
+  align-items: center;
+}
+
+.register-copy {
+  padding-right: 20px;
+}
+
+.copy-badge {
+  display: inline-flex;
+  padding: 8px 14px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.03);
+  color: rgba(255, 255, 255, 0.65);
+  font-size: 12px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  animation: revealUp 0.82s ease both;
+}
+
+.register-copy h1 {
+  margin: 26px 0 18px;
+  font-size: clamp(34px, 5.6vw, 58px);
+  line-height: 1.06;
+  letter-spacing: -0.04em;
+  animation: revealUp 0.94s ease both;
+  animation-delay: 0.1s;
+}
+
+.register-copy p {
+  max-width: 500px;
+  margin: 0;
+  color: rgba(255, 255, 255, 0.58);
+  font-size: 16px;
+  line-height: 1.9;
+  animation: revealUp 1.04s ease both;
+  animation-delay: 0.18s;
 }
 
 .register-card {
-  width: 100%;
-  max-width: 420px;
-  border-radius: 16px;
-  border: 2px solid rgba(255, 255, 255, 0.2);
+  animation: registerCardIn 0.95s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  animation-delay: 0.24s;
 }
 
-.register-card :deep(.ant-card-head) {
-  text-align: center;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-}
-
-.register-card :deep(.ant-card-head-title) {
-  font-size: 20px;
-  font-weight: 600;
-  color: #fff;
-}
-
-.register-card :deep(.ant-card-body) {
-  color: #e0e0e0;
-}
-
-.register-card :deep(.ant-form-item-label > label) {
-  color: #a0a0a0;
-  font-size: 14px;
-}
-
-.register-card :deep(.ant-input),
-.register-card :deep(.ant-input-password .ant-input),
-.register-card :deep(.ant-input-affix-wrapper) {
-  background: #1a1a1a !important;
-  border: 2px solid rgba(255, 255, 255, 0.3) !important;
-  color: #fff !important;
-  border-radius: 8px;
-  font-size: 15px;
-  -webkit-text-fill-color: #fff !important;
-  -webkit-box-shadow: 0 0 0 1000px #1a1a1a inset !important;
-  box-shadow: 0 0 0 1000px #1a1a1a inset !important;
-}
-
-.register-card :deep(.ant-input::placeholder),
-.register-card :deep(.ant-input-password .ant-input::placeholder) {
-  color: #666 !important;
-}
-
-.register-card :deep(.ant-input:focus),
-.register-card :deep(.ant-input-focused),
-.register-card :deep(.ant-input-affix-wrapper:focus),
-.register-card :deep(.ant-input-affix-wrapper-focused) {
-  background: #1a1a1a !important;
-  border-color: #fff !important;
-  box-shadow: 0 0 0 1000px #1a1a1a inset !important;
-}
-
-.register-card :deep(.ant-input-affix-wrapper:hover),
-.register-card :deep(.ant-input:hover) {
-  border-color: rgba(255, 255, 255, 0.5) !important;
-}
-
-.register-card :deep(.ant-input-password-icon) {
-  color: #888;
-}
-
-.register-card :deep(.ant-input-password-icon:hover) {
-  color: #fff;
-}
-
-.register-card :deep(.ant-btn-primary) {
-  background: #fff;
-  border: 2px solid #fff;
-  color: #0a0a0a;
-  border-radius: 8px;
-  font-weight: 600;
-  font-size: 16px;
-  height: 44px;
-}
-
-.register-card :deep(.ant-btn-primary:hover),
-.register-card :deep(.ant-btn-primary:focus) {
-  background: #e0e0e0;
-  border-color: #e0e0e0;
-  color: #0a0a0a;
-}
-
-.register-card :deep(.ant-btn-primary:disabled) {
-  background: #333;
-  border-color: #333;
-  color: #666;
-}
-
-.role-selector {
+.register-card-title {
   display: flex;
-  justify-content: center;
+  flex-direction: column;
+  gap: 4px;
 }
 
-.role-selector :deep(.ant-radio-group) {
-  display: flex;
-  gap: 16px;
+.register-card-title span {
+  font-size: 24px;
 }
 
-.role-selector :deep(.ant-radio-button-wrapper) {
-  flex: 1;
+.register-card-title small {
+  color: rgba(255, 255, 255, 0.44);
+}
+
+.register-alert {
+  margin-bottom: 18px;
+}
+
+.register-submit {
+  margin-bottom: 14px;
+}
+
+.register-footer {
   text-align: center;
-  padding: 12px 24px;
-  height: auto;
-  background: transparent;
-  border: 2px solid rgba(255, 255, 255, 0.3);
-  color: #a0a0a0;
-  border-radius: 8px;
+  color: rgba(255, 255, 255, 0.45);
 }
 
-.role-selector :deep(.ant-radio-button-wrapper:first-child),
-.role-selector :deep(.ant-radio-button-wrapper:last-child) {
-  border-radius: 8px;
-}
-
-.role-selector :deep(.ant-radio-button-wrapper:hover) {
-  color: #fff;
-  border-color: rgba(255, 255, 255, 0.5);
-}
-
-.role-selector :deep(.ant-radio-button-wrapper-checked) {
-  background: #fff;
-  border-color: #fff;
-  color: #0a0a0a;
-}
-
-.register-card :deep(.ant-alert-error) {
-  background: rgba(255, 77, 79, 0.15);
-  border: 1px solid rgba(255, 77, 79, 0.4);
-}
-
-.register-card :deep(.ant-alert-error .ant-alert-message) {
-  color: #ff7875;
-}
-
-.register-card :deep(.ant-alert-error .ant-alert-description) {
-  color: #ffa39e;
-}
-
-.register-card :deep(.ant-alert-error .ant-alert-icon) {
-  color: #ff7875;
-}
-
-.register-card :deep(.ant-alert-success) {
-  background: rgba(82, 196, 26, 0.15);
-  border: 1px solid rgba(82, 196, 26, 0.4);
-}
-
-.register-card :deep(.ant-alert-success .ant-alert-message) {
-  color: #73d13d;
-}
-
-.register-card :deep(.ant-alert-success .ant-alert-description) {
-  color: #95de64;
-}
-
-.register-card :deep(.ant-alert-success .ant-alert-icon) {
-  color: #73d13d;
-}
-
-.login-link {
-  text-align: center;
-  margin-top: 16px;
-  color: #888;
-}
-
-.login-link a {
-  color: #fff;
+.register-footer a {
+  margin-left: 8px;
+  color: rgba(255, 255, 255, 0.92);
   text-decoration: none;
-  font-weight: 500;
-  margin-left: 4px;
 }
 
-.login-link a:hover {
-  text-decoration: underline;
-}
-
-@media (max-width: 480px) {
-  .register-container {
-    padding: 16px;
+@keyframes revealUp {
+  from {
+    opacity: 0;
+    transform: translateY(22px);
   }
-  
-  .register-card {
-    border-radius: 12px;
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes registerCardIn {
+  from {
+    opacity: 0;
+    transform: translateY(28px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes regFloatA {
+  0%,
+  100% {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  50% {
+    transform: translate3d(36px, -26px, 0) scale(1.08);
+  }
+}
+
+@keyframes regFloatB {
+  0%,
+  100% {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  50% {
+    transform: translate3d(-44px, 24px, 0) scale(1.1);
+  }
+}
+
+@media (max-width: 980px) {
+  .register-wrap {
+    grid-template-columns: 1fr;
+  }
+
+  .register-copy {
+    padding-right: 0;
+  }
+}
+
+@media (max-width: 640px) {
+  .register-shell {
+    padding: 18px 14px 24px;
   }
 }
 </style>

@@ -149,7 +149,6 @@ def get_authoritative_context(query):
 # ========================== 用户认证路由 ==========================
 # (由于空间限制，认证路由 register, login, logout, check_auth 逻辑与你原有代码保持绝对一致)
 @app.route("/api/register", methods=["POST"])
-@rate_limit(limit=5, window=300)
 def register():
     data = flask.request.json
     username, email, password = data.get('username'), data.get('email'), data.get('password')

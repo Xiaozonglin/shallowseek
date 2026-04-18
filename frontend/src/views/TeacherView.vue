@@ -1,202 +1,169 @@
 <template>
-  <a-layout class="teacher-container">
-    <a-layout-content>
-      <a-row :gutter="[16, 16]" style="padding: 24px;">
-        <!-- 左侧：问答情况 -->
-        <a-col :xs="24" :lg="16">
-          <!-- 数据概览卡片 -->
-          <a-row :gutter="[16, 16]" style="margin-bottom: 16px;">
-            <a-col :xs="12" :sm="12">
-              <a-card>
-                <a-statistic 
-                  title="总提问数" 
-                  :value="stats.total_questions || 0"
-                  :value-style="{ color: '#3f8600' }"
-                />
-              </a-card>
-            </a-col>
-            <a-col :xs="12" :sm="12">
-              <a-card>
-                <a-statistic 
-                  title="活跃学生数" 
-                  :value="Object.keys(stats.questions_by_student || {}).length"
-                  :value-style="{ color: '#1890ff' }"
-                />
-              </a-card>
-            </a-col>
-          </a-row>
-          
-          <!-- AI总结报告 -->
-          <a-card v-if="stats.summary" title="📊 AI 学习情况总结" style="margin-bottom: 16px;">
-            <div class="summary-content">
-              {{ stats.summary }}
-            </div>
+  <div class="teacher-page">
+    <div class="container teacher-shell">
+      <section class="teacher-hero">
+        <div>
+          <div class="teacher-eyebrow">Teacher Console</div>
+          <h1>轻松掌握学生学习状态。</h1>
+          <p>
+            把统计、待处理问题与留言回复集中到同一工作台，信息更清晰，决策更直接。
+          </p>
+        </div>
+      </section>
+
+      <transition name="soft-rise">
+        <a-spin v-if="loading" tip="数据加载中..." class="teacher-loading" />
+      </transition>
+      <transition name="soft-rise">
+        <a-alert v-if="error" type="error" message="加载失败" :description="error" show-icon class="teacher-error" />
+      </transition>
+
+      <a-row :gutter="[24, 24]">
+        <a-col :xs="24" :xl="16">
+          <div class="stats-grid">
+            <a-card class="surface-card stat-tile">
+              <span>总提问数</span>
+              <strong>{{ stats.total_questions || 0 }}</strong>
+            </a-card>
+            <a-card class="surface-card stat-tile">
+              <span>活跃学生数</span>
+              <strong>{{ Object.keys(stats.questions_by_student || {}).length }}</strong>
+            </a-card>
+          </div>
+
+          <a-card v-if="stats.summary" class="surface-card teacher-card" title="AI 学习总结">
+            <div class="summary-content">{{ stats.summary }}</div>
           </a-card>
-          
-          <!-- 权威答案管理 -->
-          <a-card title="📝 权威答案管理" style="margin-bottom: 16px;">
+
+          <a-card class="surface-card teacher-card" title="待处理权威答案">
             <template #extra>
-              <a-button type="primary" size="small" @click="fetchPendingQuestions">
-                刷新
-              </a-button>
+              <a-button type="primary" size="small" @click="fetchPendingQuestions">刷新</a-button>
             </template>
-            
-            <a-empty v-if="pendingQuestions.length === 0" description="暂无待处理问题" />
-            
+
+            <a-empty v-if="pendingQuestions.length === 0" description="当前没有待处理问题" />
+
             <a-collapse v-else v-model:activeKey="activeQuestionKeys" accordion>
-              <a-collapse-panel 
-                v-for="item in pendingQuestions" 
-                :key="item.id" 
-                :header="`来自: ${item.student_name} - ${item.content.substring(0, 30)}...`"
+              <a-collapse-panel
+                v-for="item in pendingQuestions"
+                :key="item.id"
+                :header="`${item.student_name} · ${item.content.substring(0, 28)}...`"
               >
-                <p><strong>问题:</strong> {{ item.content }}</p>
-                
-                <a-divider orientation="left">AI初步答案</a-divider>
-                <div class="answer-content">{{ item.ai_answer }}</div>
-                
-                <div v-if="item.authoritative_answer" style="margin-top: 16px;">
-                  <a-divider orientation="left">✅ 已设权威答案</a-divider>
-                  <div class="answer-content">{{ item.authoritative_answer }}</div>
+                <div class="qa-block">
+                  <span class="block-label">学生问题</span>
+                  <p>{{ item.content }}</p>
                 </div>
-                
-                <div v-else style="margin-top: 16px;">
-                  <a-divider orientation="left">提交权威答案</a-divider>
-                  <a-form layout="vertical">
-                    <a-form-item label="权威答案">
-                      <a-textarea
-                        v-model:value="item.newAuthAnswer"
-                        placeholder="在此输入您的权威答案..."
-                        :rows="3"
-                      />
-                    </a-form-item>
-                    <a-form-item>
-                      <a-button 
-                        type="primary" 
-                        @click="submitAuthAnswer(item)"
-                        :disabled="!item.newAuthAnswer || !item.newAuthAnswer.trim()"
-                      >
-                        提交为权威答案
-                      </a-button>
-                    </a-form-item>
-                  </a-form>
+
+                <div class="qa-block">
+                  <span class="block-label">AI 初步回答</span>
+                  <div class="answer-box">{{ item.ai_answer }}</div>
+                </div>
+
+                <div v-if="item.authoritative_answer" class="qa-block">
+                  <span class="block-label">已提交权威答案</span>
+                  <div class="answer-box">{{ item.authoritative_answer }}</div>
+                </div>
+
+                <div v-else class="qa-block">
+                  <span class="block-label">提交权威答案</span>
+                  <a-textarea
+                    v-model:value="item.newAuthAnswer"
+                    placeholder="在这里写入你希望学生最终看到的答案。"
+                    :rows="4"
+                  />
+                  <a-button
+                    type="primary"
+                    class="submit-answer"
+                    @click="submitAuthAnswer(item)"
+                    :disabled="!item.newAuthAnswer || !item.newAuthAnswer.trim()"
+                  >
+                    设为权威答案
+                  </a-button>
                 </div>
               </a-collapse-panel>
             </a-collapse>
           </a-card>
-          
-          <!-- 学生提问详情 -->
-          <a-card title="👨‍🎓 学生学习情况分析">
-            <a-empty v-if="!stats.questions_by_student || Object.keys(stats.questions_by_student).length === 0" description="暂无学生提问数据" />
-            
+
+          <a-card class="surface-card teacher-card" title="学生学习分析">
+            <a-empty
+              v-if="!stats.questions_by_student || Object.keys(stats.questions_by_student).length === 0"
+              description="暂无学生提问数据"
+            />
+
             <a-collapse v-else v-model:activeKey="activeStudentKeys" accordion>
-              <a-collapse-panel 
-                v-for="(questions, studentName) in stats.questions_by_student" 
-                :key="studentName" 
-                :header="`${studentName} (提问次数: ${questions.length})`"
+              <a-collapse-panel
+                v-for="(questions, studentName) in stats.questions_by_student"
+                :key="studentName"
+                :header="`${studentName} · 提问 ${questions.length} 次`"
               >
                 <div class="student-summary">
-                  <strong>AI 学习情况分析：</strong>
+                  <span class="block-label">学习概览</span>
                   <p v-if="stats.student_summaries && stats.student_summaries[studentName]">
                     {{ stats.student_summaries[studentName] }}
                   </p>
-                  <p v-else>暂无分析</p>
+                  <p v-else>暂时没有总结内容。</p>
                 </div>
-                
-                <a-divider orientation="left">提问记录</a-divider>
-                <a-list
-                  item-layout="horizontal"
-                  :data-source="questions"
-                >
-                  <template #renderItem="{ item, index }">
-                    <a-list-item>
-                      <a-list-item-meta
-                        :description="item.question"
-                      >
-                        <template #title>
-                          <span>Q{{ index + 1 }}</span>
-                        </template>
-                      </a-list-item-meta>
-                    </a-list-item>
-                  </template>
-                </a-list>
+
+                <div class="question-list">
+                  <article v-for="(item, index) in questions" :key="index" class="question-entry">
+                    <span class="question-index">Q{{ index + 1 }}</span>
+                    <p>{{ item.question }}</p>
+                  </article>
+                </div>
               </a-collapse-panel>
             </a-collapse>
           </a-card>
         </a-col>
 
-        <!-- 右侧：留言管理 -->
-        <a-col :xs="24" :lg="8">
-          <a-card title="💬 学生留言与回复">
+        <a-col :xs="24" :xl="8">
+          <a-card class="surface-card teacher-card" title="学生留言与回复">
             <a-empty v-if="messages.length === 0" description="暂无学生留言" />
-            
-            <a-list v-else
-              item-layout="vertical"
-              :data-source="messages"
-            >
-              <template #renderItem="{ item }">
-                <a-list-item>
-                  <a-card size="small">
-                    <template #title>
-                      <span>{{ item.sender }} 留言</span>
-                    </template>
-                    <template #extra>
-                      <span style="font-size: 12px; color: #999;">{{ item.timestamp }}</span>
-                    </template>
-                    <p>{{ item.content }}</p>
-                    
-                    <div v-if="item.reply_content" style="margin-top: 12px;">
-                      <a-divider style="margin: 8px 0;" />
-                      <p><strong>您的回复:</strong> {{ item.reply_content }}</p>
-                    </div>
-                    
-                    <div v-else style="margin-top: 12px;">
-                      <a-textarea
-                        v-model:value="item.newReply"
-                        placeholder="输入回复内容..."
-                        :rows="2"
-                        style="margin-bottom: 8px;"
-                      />
-                      <a-button 
-                        type="primary" 
-                        size="small"
-                        @click="replyToMessage(item)"
-                        :disabled="!item.newReply || !item.newReply.trim()"
-                      >
-                        发送回复
-                      </a-button>
-                    </div>
-                  </a-card>
-                </a-list-item>
-              </template>
-            </a-list>
+
+            <TransitionGroup v-else name="stack-reveal" tag="div" class="message-stack">
+              <article v-for="item in messages" :key="item.id" class="message-entry">
+                <div class="message-head">
+                  <div>
+                    <strong>{{ item.sender }}</strong>
+                    <small>{{ item.timestamp }}</small>
+                  </div>
+                </div>
+
+                <p class="message-content">{{ item.content }}</p>
+
+                <div v-if="item.reply_content" class="reply-box">
+                  <span class="block-label">你的回复</span>
+                  <p>{{ item.reply_content }}</p>
+                </div>
+
+                <div v-else class="reply-editor">
+                  <a-textarea
+                    v-model:value="item.newReply"
+                    placeholder="输入回复内容..."
+                    :rows="3"
+                  />
+                  <a-button
+                    type="primary"
+                    @click="replyToMessage(item)"
+                    :disabled="!item.newReply || !item.newReply.trim()"
+                  >
+                    发送回复
+                  </a-button>
+                </div>
+              </article>
+            </TransitionGroup>
           </a-card>
         </a-col>
       </a-row>
-      
-      <!-- 加载和错误状态 -->
-      <a-spin v-if="loading" tip="数据加载中..." style="display: block; text-align: center; margin: 24px 0;">
-      </a-spin>
-      <a-alert 
-        v-if="error" 
-        type="error" 
-        message="错误" 
-        :description="error"
-        show-icon
-        style="margin: 24px;"
-      />
-    </a-layout-content>
-  </a-layout>
+    </div>
+  </div>
 </template>
 
 <script>
-import { ref, onMounted } from 'vue'
-import { useRouter } from 'vue-router'
+import { onMounted, ref } from 'vue'
 import axios from 'axios'
 
 export default {
   name: 'TeacherView',
   setup() {
-    const router = useRouter()
     const stats = ref({})
     const pendingQuestions = ref([])
     const messages = ref([])
@@ -222,16 +189,15 @@ export default {
     const fetchPendingQuestions = async () => {
       try {
         const response = await axios.get('/api/questions/pending')
-        pendingQuestions.value = response.data.map(q => ({ ...q, newAuthAnswer: '' }))
+        pendingQuestions.value = response.data.map((item) => ({ ...item, newAuthAnswer: '' }))
       } catch (err) {
         console.error('获取问题列表失败:', err)
       }
     }
 
     const submitAuthAnswer = async (question) => {
-      if (!question.newAuthAnswer || !question.newAuthAnswer.trim()) {
-        return
-      }
+      if (!question.newAuthAnswer || !question.newAuthAnswer.trim()) return
+
       try {
         await axios.post(`/api/questions/${question.id}/authoritative`, {
           answer: question.newAuthAnswer
@@ -239,14 +205,14 @@ export default {
         question.authoritative_answer = question.newAuthAnswer
         question.newAuthAnswer = ''
       } catch (err) {
-        console.error('提交失败:', err)
+        console.error('提交权威答案失败:', err)
       }
     }
 
     const fetchMessages = async () => {
       try {
         const response = await axios.get('/api/messages')
-        messages.value = response.data.map(m => ({ ...m, newReply: '' }))
+        messages.value = response.data.map((item) => ({ ...item, newReply: '' }))
       } catch (err) {
         console.error('获取留言失败:', err)
       }
@@ -260,17 +226,7 @@ export default {
         msg.reply_content = msg.newReply
         msg.newReply = ''
       } catch (err) {
-        console.error('回复失败:', err)
-      }
-    }
-
-    const logout = async () => {
-      try {
-        await axios.post('/api/logout')
-      } catch (error) {
-        console.error('老师登出失败:', error)
-      } finally {
-        router.push('/login')
+        console.error('回复留言失败:', err)
       }
     }
 
@@ -290,55 +246,279 @@ export default {
       activeStudentKeys,
       fetchPendingQuestions,
       submitAuthAnswer,
-      fetchMessages,
-      replyToMessage,
-      logout
+      replyToMessage
     }
   }
 }
 </script>
 
 <style scoped>
-.teacher-container {
-  min-height: 100vh;
-  background: #0a0a0a;
+.teacher-shell {
+  position: relative;
+  z-index: 1;
+}
+
+.teacher-hero {
+  margin-bottom: 28px;
+  padding: 16px 0 8px;
+}
+
+.teacher-eyebrow {
+  display: inline-flex;
+  margin-bottom: 14px;
+  font-size: 12px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.45);
+  animation: revealUp 0.7s ease both;
+}
+
+.teacher-hero h1 {
+  max-width: 920px;
+  margin: 0 0 12px;
+  font-size: clamp(30px, 4.3vw, 50px);
+  line-height: 1.04;
+  letter-spacing: -0.04em;
+  animation: revealUp 0.88s ease both;
+  animation-delay: 0.08s;
+}
+
+.teacher-hero p {
+  max-width: 760px;
+  margin: 0;
+  color: rgba(255, 255, 255, 0.56);
+  line-height: 1.8;
+  animation: revealUp 1s ease both;
+  animation-delay: 0.16s;
+}
+
+.teacher-loading,
+.teacher-error {
+  margin-bottom: 20px;
+}
+
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 20px;
+  margin-bottom: 24px;
+}
+
+.stat-tile {
+  animation: revealUp 0.9s ease both;
+}
+
+.stat-tile:nth-child(1) {
+  animation-delay: 0.2s;
+}
+
+.stat-tile:nth-child(2) {
+  animation-delay: 0.3s;
+}
+
+.stat-tile :deep(.ant-card-body) {
+  padding: 24px;
+}
+
+.stat-tile span {
+  display: block;
+  color: rgba(255, 255, 255, 0.45);
+  font-size: 13px;
+}
+
+.stat-tile strong {
+  display: block;
+  margin-top: 14px;
+  font-size: 36px;
+  font-weight: 600;
+}
+
+.teacher-card {
+  margin-bottom: 24px;
+  animation: revealUp 0.95s ease both;
+}
+
+.teacher-card:nth-of-type(2) {
+  animation-delay: 0.24s;
+}
+
+.teacher-card:nth-of-type(3) {
+  animation-delay: 0.32s;
 }
 
 .summary-content {
-  line-height: 1.6;
-  color: #e0e0e0;
-  font-size: 16px;
   white-space: pre-wrap;
+  line-height: 1.9;
+  color: rgba(255, 255, 255, 0.78);
 }
 
-.answer-content {
-  line-height: 1.6;
-  color: #e0e0e0;
-  font-size: 14px;
-  max-height: 200px;
-  overflow-y: auto;
-  padding: 12px;
-  background: #141414;
-  border-radius: 8px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-}
-
+.qa-block,
 .student-summary {
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 8px;
-  padding: 16px;
-  margin-bottom: 16px;
+  margin-bottom: 18px;
 }
 
-.student-summary strong {
-  color: #fff;
-  font-size: 14px;
+.block-label {
+  display: inline-flex;
+  margin-bottom: 10px;
+  color: rgba(255, 255, 255, 0.42);
+  font-size: 12px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
 }
 
+.qa-block p,
 .student-summary p {
-  margin: 12px 0 0 0;
-  color: #a0a0a0;
-  line-height: 1.6;
+  margin: 0;
+  color: rgba(255, 255, 255, 0.76);
+  line-height: 1.8;
+}
+
+.answer-box {
+  padding: 16px 18px;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.76);
+  line-height: 1.8;
+  white-space: pre-wrap;
+  transition: transform 0.32s ease, border-color 0.32s ease;
+}
+
+.answer-box:hover {
+  transform: translateY(-2px);
+  border-color: rgba(255, 255, 255, 0.14);
+}
+
+.submit-answer {
+  margin-top: 14px;
+}
+
+.question-list {
+  display: grid;
+  gap: 12px;
+}
+
+.question-entry {
+  display: grid;
+  grid-template-columns: 52px 1fr;
+  gap: 14px;
+  padding: 16px 18px;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  transition: transform 0.32s ease, border-color 0.32s ease, background 0.32s ease;
+}
+
+.question-entry:hover {
+  transform: translateY(-3px);
+  border-color: rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.045);
+}
+
+.question-index {
+  color: rgba(255, 255, 255, 0.38);
+  font-size: 12px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.question-entry p {
+  margin: 0;
+  color: rgba(255, 255, 255, 0.78);
+  line-height: 1.8;
+}
+
+.message-stack {
+  display: grid;
+  gap: 16px;
+}
+
+.message-entry {
+  padding: 20px;
+  border-radius: 22px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  transition: transform 0.32s ease, border-color 0.32s ease, background 0.32s ease;
+}
+
+.message-entry:hover {
+  transform: translateY(-3px);
+  border-color: rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.045);
+}
+
+.message-head strong {
+  display: block;
+  color: rgba(255, 255, 255, 0.95);
+  font-size: 16px;
+}
+
+.message-head small {
+  color: rgba(255, 255, 255, 0.38);
+  font-size: 12px;
+}
+
+.message-content {
+  margin: 14px 0 0;
+  color: rgba(255, 255, 255, 0.76);
+  line-height: 1.8;
+}
+
+.reply-box,
+.reply-editor {
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.reply-box p {
+  margin: 0;
+  color: rgba(255, 255, 255, 0.78);
+  line-height: 1.8;
+}
+
+.reply-editor .ant-btn {
+  margin-top: 12px;
+}
+
+.soft-rise-enter-active,
+.soft-rise-leave-active,
+.stack-reveal-enter-active,
+.stack-reveal-leave-active {
+  transition: opacity 0.35s ease, transform 0.35s ease, filter 0.35s ease;
+}
+
+.soft-rise-enter-from,
+.soft-rise-leave-to,
+.stack-reveal-enter-from,
+.stack-reveal-leave-to {
+  opacity: 0;
+  transform: translateY(16px);
+  filter: blur(6px);
+}
+
+.stack-reveal-move {
+  transition: transform 0.35s ease;
+}
+
+@keyframes revealUp {
+  from {
+    opacity: 0;
+    transform: translateY(22px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (max-width: 640px) {
+  .stats-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .question-entry {
+    grid-template-columns: 1fr;
+  }
 }
 </style>
