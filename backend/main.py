@@ -255,35 +255,20 @@ def handle_qa():
         messages.append({"role": "user", "content": user_content})
 
         # 3. 数据预处理
-        text_prompt = ai.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        image_inputs, video_inputs = process_vision_info(messages)
-
-        inputs = ai.processor(
-            text=[text_prompt],
-            images=image_inputs,
-            videos=video_inputs,
-            padding=True,
-            return_tensors="pt"
-        ).to(ai.device)
-
-        # 4. 设置流式处理器
-        streamer = TextIteratorStreamer(ai.processor.tokenizer, skip_prompt=True, timeout=60)
-        
-        with torch.inference_mode():
-            generation_kwargs = dict(
-                **inputs,
-                streamer=streamer, 
-                max_new_tokens=1024, 
-                temperature=0.7, 
-                top_p=0.9
-            )
+        streamer, generation_kwargs = ai.stream_generate_from_messages(
+            messages,
+            max_new_tokens=1024,
+            temperature=0.7,
+            top_p=0.9,
+     )
+            
             
             # 使用子线程推理防止阻塞 Flask 事件循环
-            thread = threading.Thread(target=ai.llm.generate, kwargs=generation_kwargs)
-            thread.start()
+        thread = threading.Thread(target=ai.llm.generate, kwargs=generation_kwargs)
+        thread.start()
 
-            full_answer = ""
-            for token in streamer:
+        full_answer = ""
+        for token in streamer:
                 full_answer += token
                 yield f"data: {json.dumps({'token': token})}\n\n"
         
