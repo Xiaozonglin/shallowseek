@@ -4,7 +4,6 @@ import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import vueDevTools from 'vite-plugin-vue-devtools'
 
-// https://vite.dev/config/
 export default defineConfig({
   plugins: [
     vue(),
@@ -16,15 +15,18 @@ export default defineConfig({
     },
   },
   server: {
+    host: '0.0.0.0',
+    port: 5173,
+    allowedHosts: true,
     proxy: {
       '/api': {
-        target: 'http://127.0.0.1:5000',  // 您的后端地址
+        target: 'http://127.0.0.1:5000',
         changeOrigin: true,
-        configure: (proxy, options) => {
-          // 禁用代理缓冲
-          proxy.on('proxyReq', (proxyReq, req, res) => {
-            proxyReq.setHeader('X-Accel-Buffering', 'no');
-          });
+        secure: false,
+        configure: (proxy) => {
+          proxy.on('proxyReq', (proxyReq) => {
+            proxyReq.setHeader('X-Accel-Buffering', 'no')
+          })
         }
       }
     }
