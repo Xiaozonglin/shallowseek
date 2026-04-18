@@ -24,10 +24,6 @@ from langchain_community.vectorstores import FAISS
 from langchain_huggingface import HuggingFaceEmbeddings
 from sentence_transformers import SentenceTransformer, util
 
-# ==================== Qwen-VL 核心依赖 ====================
-from transformers import Qwen2VLForConditionalGeneration, AutoProcessor, TextIteratorStreamer
-from qwen_vl_utils import process_vision_info
-
 # ========================== 基础与安全配置 ==========================
 from dotenv import load_dotenv
 load_dotenv()
@@ -343,6 +339,112 @@ def messages():
     return flask.jsonify([{"id": m.id, "content": m.content, "status": m.status, "reply_content": m.reply_content, "timestamp": m.timestamp.isoformat(), "sender": db.session.get(User, m.sender_id).username if db.session.get(User, m.sender_id) else "未知", "reply_timestamp": m.reply_timestamp.isoformat() if m.reply_timestamp else None} for m in msgs]), 200
 
 # ========================== 教师管理端路由 ==========================
+@app.route("/api/questions/stats", methods=["GET"])
+@login_required
+def get_question_stats():
+    """获取问题统计数据并生成 AI 学习情况分析"""
+    if current_user.role != 'teacher':
+        return flask.jsonify({"error": "Permission denied"}), 403
+    
+    # 1. 获取所有问题并按学生分组
+    questions = Question.query.all()
+    total_questions = len(questions)
+    
+    questions_by_student = {}
+    for q in questions:
+        student = db.session.get(User, q.student_id)
+        if student:
+            if student.username not in questions_by_student:
+                questions_by_student[student.username] = []
+            questions_by_student[student.username].append({
+                "question": q.content,
+                "answer": q.answer
+            })
+    
+    student_summaries = {}
+
+    # 2. 遍历学生生成分析
+    for student_name, qa_list in questions_by_student.items():
+        student_user = User.query.filter_by(username=student_name).first()
+        
+        # 检查缓存逻辑
+        need_update = False
+        if student_user:
+            if not student_user.summary_updated_at:
+                need_update = True
+            elif (datetime.utcnow() - student_user.summary_updated_at).total_seconds() > 86400:
+                need_update = True
+        
+        if student_user and student_user.learning_summary and not need_update:
+            student_summaries[student_name] = student_user.learning_summary
+            continue
+
+        # 3. 准备 AI Prompt 消息格式
+        qa_text = "\n".join([
+            f"问: {qa['question']}\n答: {qa['answer'][:50] if qa['answer'] else '未回答'}"
+            for qa in qa_list[:5]
+        ])
+
+        messages = [
+            {
+                "role": "system",
+                "content": [{"type": "text", "text": "你是一位教育专家，请根据提供的学生提问记录简要分析其学习兴趣、薄弱点并给出建议。字数控制在100字以内。"}]
+            },
+            {
+                "role": "user",
+                "content": [{"type": "text", "text": f"学生 {student_name} 的记录：\n{qa_text}"}]
+            }
+        ]
+
+        # 4. 调用 AIEngine 进行生成
+        try:
+            # 使用 AIEngine 的私有方法构建输入（或直接在 AIEngine 增加一个非流式 generate 方法）
+            inputs = ai._build_inputs_from_messages(messages)
+            
+            with torch.inference_mode():
+                generated_ids = ai.llm.generate(
+                    **inputs,
+                    max_new_tokens=150,
+                    temperature=0.7,
+                    do_sample=True,
+                    pad_token_id=ai.processor.tokenizer.eos_token_id
+                )
+
+            # 剪切掉 Prompt 部分，只保留生成的回答
+            generated_ids_trimmed = [
+                out_ids[len(in_ids):]
+                for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
+            ]
+            
+            output_text = ai.processor.batch_decode(
+                generated_ids_trimmed,
+                skip_special_tokens=True,
+                clean_up_tokenization_spaces=False
+            )
+
+            summary = output_text[0].strip() if output_text else f"该生近期提问 {len(qa_list)} 次。"
+            
+            # 更新数据库
+            if student_user:
+                student_user.learning_summary = summary
+                student_user.summary_updated_at = datetime.utcnow()
+                db.session.commit()
+                
+            student_summaries[student_name] = summary
+
+        except Exception as e:
+            student_summaries[student_name] = f"统计：共提问 {len(qa_list)} 次（分析生成失败）"
+
+    # 5. 返回结果
+    overall_summary = f"全班共有 {total_questions} 个问题，来自 {len(questions_by_student)} 位学生。"
+    
+    return flask.jsonify({
+        "total_questions": total_questions,
+        "questions_by_student": questions_by_student,
+        "student_summaries": student_summaries,
+        "summary": overall_summary
+    }), 200
+
 @app.route("/api/messages/<int:msg_id>/reply", methods=["POST"])
 @login_required
 def reply_message(msg_id):
