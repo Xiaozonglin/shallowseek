@@ -31,8 +31,8 @@
             </a-card>
           </div>
 
-          <a-card v-if="stats.summary" class="surface-card teacher-card" title="AI 学习总结">
-            <div class="summary-content">{{ stats.summary }}</div>
+          <a-card v-if="stats.summary" class="surface-card teacher-card" title="AI 学情分析">
+            <div class="summary-content markdown-body" v-html="renderMarkdown(stats.summary)"></div>
           </a-card>
 
           <a-card class="surface-card teacher-card" title="待处理权威答案">
@@ -79,6 +79,20 @@
                     设为权威答案
                   </a-button>
                 </div>
+
+                <div class="qa-actions">
+                  <a-popconfirm
+                    title="确定删除这条问答吗？删除后不会进入权威答案处理。"
+                    ok-text="删除"
+                    cancel-text="取消"
+                    @confirm="deletePendingQuestion(item)"
+                  >
+                    <a-button danger @click.stop>
+                      <template #icon><delete-outlined /></template>
+                      删除该问答
+                    </a-button>
+                  </a-popconfirm>
+                </div>
               </a-collapse-panel>
             </a-collapse>
           </a-card>
@@ -97,9 +111,11 @@
               >
                 <div class="student-summary">
                   <span class="block-label">学习概览</span>
-                  <p v-if="stats.student_summaries && stats.student_summaries[studentName]">
-                    {{ stats.student_summaries[studentName] }}
-                  </p>
+                  <div
+                    v-if="stats.student_summaries && stats.student_summaries[studentName]"
+                    class="student-summary-content markdown-body"
+                    v-html="renderMarkdown(stats.student_summaries[studentName])"
+                  ></div>
                   <p v-else>暂时没有总结内容。</p>
                 </div>
 
@@ -160,9 +176,17 @@
 <script>
 import { onMounted, ref } from 'vue'
 import axios from 'axios'
+import { marked } from 'marked'
+import katex from 'katex'
+import 'katex/dist/katex.min.css'
+import { message as toast } from 'ant-design-vue'
+import { DeleteOutlined } from '@ant-design/icons-vue'
 
 export default {
   name: 'TeacherView',
+  components: {
+    DeleteOutlined
+  },
   setup() {
     const stats = ref({})
     const pendingQuestions = ref([])
@@ -171,6 +195,56 @@ export default {
     const error = ref('')
     const activeQuestionKeys = ref([])
     const activeStudentKeys = ref([])
+
+    marked.setOptions({
+      breaks: true,
+      gfm: true
+    })
+
+    const renderLatex = (text) => {
+      if (!text) return ''
+
+      let result = text
+      result = result.replace(/\\\[([\s\S]+?)\\\]/g, (match, latex) => {
+        try {
+          return katex.renderToString(latex.trim(), { displayMode: true, throwOnError: false })
+        } catch {
+          return match
+        }
+      })
+      result = result.replace(/\$\$([\s\S]+?)\$\$/g, (match, latex) => {
+        try {
+          return katex.renderToString(latex.trim(), { displayMode: true, throwOnError: false })
+        } catch {
+          return match
+        }
+      })
+      result = result.replace(/\\\(([^)]+?)\\\)/g, (match, latex) => {
+        try {
+          return katex.renderToString(latex.trim(), { displayMode: false, throwOnError: false })
+        } catch {
+          return match
+        }
+      })
+      result = result.replace(/\$([^\$\n]+?)\$/g, (match, latex) => {
+        try {
+          return katex.renderToString(latex.trim(), { displayMode: false, throwOnError: false })
+        } catch {
+          return match
+        }
+      })
+      return result
+    }
+
+    const sanitizeMarkdown = (content) =>
+      String(content || '')
+        .replace(/<\|im_end\|>/g, '')
+        .replace(/<\|im_start\|>/g, '')
+
+    const renderMarkdown = (content) => {
+      if (!content) return ''
+      return marked(renderLatex(sanitizeMarkdown(content)))
+    }
 
     const fetchStats = async () => {
       loading.value = true
@@ -209,6 +283,18 @@ export default {
       }
     }
 
+    const deletePendingQuestion = async (question) => {
+      try {
+        await axios.delete(`/api/questions/${question.id}`)
+        pendingQuestions.value = pendingQuestions.value.filter((item) => item.id !== question.id)
+        await fetchStats()
+        toast.success('问答已删除')
+      } catch (err) {
+        console.error('删除问答失败:', err)
+        toast.error(err.response?.data?.error || '删除失败，请稍后重试')
+      }
+    }
+
     const fetchMessages = async () => {
       try {
         const response = await axios.get('/api/messages')
@@ -244,8 +330,11 @@ export default {
       error,
       activeQuestionKeys,
       activeStudentKeys,
+      DeleteOutlined,
+      renderMarkdown,
       fetchPendingQuestions,
       submitAuthAnswer,
+      deletePendingQuestion,
       replyToMessage
     }
   }
@@ -347,9 +436,114 @@ export default {
 }
 
 .summary-content {
-  white-space: pre-wrap;
   line-height: 1.9;
   color: rgba(255, 255, 255, 0.78);
+}
+
+.student-summary-content {
+  color: rgba(255, 255, 255, 0.76);
+}
+
+.markdown-body {
+  font-size: 15px;
+  line-height: 1.9;
+  color: rgba(255, 255, 255, 0.78);
+  word-break: break-word;
+}
+
+.markdown-body :deep(h1),
+.markdown-body :deep(h2),
+.markdown-body :deep(h3),
+.markdown-body :deep(h4),
+.markdown-body :deep(h5),
+.markdown-body :deep(h6) {
+  margin: 1.1em 0 0.55em;
+  color: rgba(255, 255, 255, 0.96);
+  line-height: 1.35;
+}
+
+.markdown-body :deep(h1) {
+  font-size: 24px;
+}
+
+.markdown-body :deep(h2) {
+  font-size: 21px;
+}
+
+.markdown-body :deep(h3) {
+  font-size: 18px;
+}
+
+.markdown-body :deep(p),
+.markdown-body :deep(ul),
+.markdown-body :deep(ol),
+.markdown-body :deep(pre),
+.markdown-body :deep(blockquote),
+.markdown-body :deep(table) {
+  margin: 0 0 16px;
+}
+
+.markdown-body :deep(ul),
+.markdown-body :deep(ol) {
+  padding-left: 24px;
+}
+
+.markdown-body :deep(li + li) {
+  margin-top: 6px;
+}
+
+.markdown-body :deep(hr) {
+  margin: 24px 0;
+  border: 0;
+  border-top: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.markdown-body :deep(strong) {
+  color: rgba(255, 255, 255, 0.94);
+  font-weight: 700;
+}
+
+.markdown-body :deep(code) {
+  padding: 0.18em 0.45em;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.96);
+}
+
+.markdown-body :deep(pre) {
+  padding: 16px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  overflow: auto;
+}
+
+.markdown-body :deep(pre code) {
+  padding: 0;
+  background: transparent;
+}
+
+.markdown-body :deep(blockquote) {
+  padding-left: 16px;
+  border-left: 2px solid rgba(255, 255, 255, 0.15);
+  color: rgba(255, 255, 255, 0.58);
+}
+
+.markdown-body :deep(table) {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.markdown-body :deep(th),
+.markdown-body :deep(td) {
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.markdown-body :deep(.katex-display) {
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 6px 0;
 }
 
 .qa-block,
@@ -391,6 +585,14 @@ export default {
 
 .submit-answer {
   margin-top: 14px;
+}
+
+.qa-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  padding-top: 14px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
 }
 
 .question-list {

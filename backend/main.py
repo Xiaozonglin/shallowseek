@@ -146,6 +146,93 @@ def get_authoritative_context(query):
         return f"\n【历史权威参考】来自{t_name}的解答：\n{best_match.authoritative_answer}\n"
     return ""
 
+def truncate_for_prompt(text, max_chars=220):
+    if not text:
+        return "暂无"
+    text = re.sub(r"\s+", " ", str(text)).strip()
+    return text[:max_chars] + ("..." if len(text) > max_chars else "")
+
+def generate_ai_text(system_prompt, user_prompt, max_new_tokens=360):
+    messages = [
+        {
+            "role": "system",
+            "content": [{"type": "text", "text": system_prompt}]
+        },
+        {
+            "role": "user",
+            "content": [{"type": "text", "text": user_prompt}]
+        }
+    ]
+
+    inputs = ai._build_inputs_from_messages(messages)
+
+    with torch.inference_mode():
+        generated_ids = ai.llm.generate(
+            **inputs,
+            max_new_tokens=max_new_tokens,
+            temperature=0.65,
+            do_sample=True,
+            pad_token_id=ai.processor.tokenizer.eos_token_id
+        )
+
+    generated_ids_trimmed = [
+        out_ids[len(in_ids):]
+        for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
+    ]
+
+    output_text = ai.processor.batch_decode(
+        generated_ids_trimmed,
+        skip_special_tokens=True,
+        clean_up_tokenization_spaces=False
+    )
+
+    return output_text[0].strip() if output_text else ""
+
+def build_qa_digest(qa_list, max_items=8, answer_chars=180):
+    lines = []
+    for index, qa in enumerate(qa_list[:max_items], start=1):
+        question = truncate_for_prompt(qa.get("question"), 180)
+        answer = truncate_for_prompt(qa.get("answer"), answer_chars)
+        lines.append(f"{index}. 问：{question}\n   AI答：{answer}")
+    return "\n".join(lines)
+
+def build_class_digest(questions_by_student, max_students=12, max_items_per_student=5):
+    blocks = []
+    for student_name, qa_list in list(questions_by_student.items())[:max_students]:
+        blocks.append(
+            f"学生：{student_name}（提问 {len(qa_list)} 次）\n"
+            f"{build_qa_digest(qa_list, max_items=max_items_per_student, answer_chars=120)}"
+        )
+    return "\n\n".join(blocks)
+
+def fallback_learning_summary(student_name, qa_list):
+    samples = "；".join([truncate_for_prompt(qa.get("question"), 36) for qa in qa_list[:4]])
+    if not samples:
+        samples = "暂无可归纳的问题样本"
+    return (
+        f"{student_name} 近期主要围绕「{samples}」提问。建议教师结合这些问题定位具体知识点，"
+        "优先补充概念边界、解题步骤和典型例题，并观察后续提问是否仍集中在同一类误区。"
+    )
+
+def fallback_class_summary(total_questions, questions_by_student):
+    samples = []
+    for qa_list in questions_by_student.values():
+        for qa in qa_list[:2]:
+            samples.append(truncate_for_prompt(qa.get("question"), 34))
+            if len(samples) >= 6:
+                break
+        if len(samples) >= 6:
+            break
+
+    if not samples:
+        return "暂无学生提问数据，暂时无法形成具体学情分析。"
+
+    return (
+        f"本次记录包含 {total_questions} 个问题。代表性问题包括：{'；'.join(samples)}。"
+        "从这些问题看，学生需要的不只是答案数量统计，而是对概念区分、题意识别、图像/公式理解和解题路径的归纳。"
+        "建议后续按知识点整理共性问题，配合错因讲解与同类变式练习。"
+    )
+
 # ========================== 用户认证路由 ==========================
 # (由于空间限制，认证路由 register, login, logout, check_auth 逻辑与你原有代码保持绝对一致)
 @app.route("/api/register", methods=["POST"])
@@ -346,7 +433,7 @@ def get_question_stats():
         return flask.jsonify({"error": "Permission denied"}), 403
     
     # 1. 获取所有问题并按学生分组
-    questions = Question.query.all()
+    questions = Question.query.order_by(Question.timestamp.desc()).all()
     total_questions = len(questions)
     
     questions_by_student = {}
@@ -357,7 +444,8 @@ def get_question_stats():
                 questions_by_student[student.username] = []
             questions_by_student[student.username].append({
                 "question": q.content,
-                "answer": q.answer
+                "answer": q.answer,
+                "timestamp": q.timestamp.isoformat()
             })
     
     student_summaries = {}
@@ -378,50 +466,16 @@ def get_question_stats():
             student_summaries[student_name] = student_user.learning_summary
             continue
 
-        # 3. 准备 AI Prompt 消息格式
-        qa_text = "\n".join([
-            f"问: {qa['question']}\n答: {qa['answer'][:50] if qa['answer'] else '未回答'}"
-            for qa in qa_list[:5]
-        ])
+        qa_text = build_qa_digest(qa_list)
 
-        messages = [
-            {
-                "role": "system",
-                "content": [{"type": "text", "text": "你是一位教育专家，请根据提供的学生提问记录简要分析其学习兴趣、薄弱点并给出建议。字数控制在100字以内。"}]
-            },
-            {
-                "role": "user",
-                "content": [{"type": "text", "text": f"学生 {student_name} 的记录：\n{qa_text}"}]
-            }
-        ]
-
-        # 4. 调用 AIEngine 进行生成
         try:
-            # 使用 AIEngine 的私有方法构建输入（或直接在 AIEngine 增加一个非流式 generate 方法）
-            inputs = ai._build_inputs_from_messages(messages)
-            
-            with torch.inference_mode():
-                generated_ids = ai.llm.generate(
-                    **inputs,
-                    max_new_tokens=150,
-                    temperature=0.7,
-                    do_sample=True,
-                    pad_token_id=ai.processor.tokenizer.eos_token_id
-                )
-
-            # 剪切掉 Prompt 部分，只保留生成的回答
-            generated_ids_trimmed = [
-                out_ids[len(in_ids):]
-                for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
-            ]
-            
-            output_text = ai.processor.batch_decode(
-                generated_ids_trimmed,
-                skip_special_tokens=True,
-                clean_up_tokenization_spaces=False
+            summary = generate_ai_text(
+                "你是一位教师教研助手。请基于学生的真实提问和 AI 回答，分析具体知识点、可能误区和后续辅导建议。不要只统计提问次数；必须点出学生正在困惑的知识点或能力点。输出 3 句以内，150 到 220 个中文字符。",
+                f"学生 {student_name} 的问答记录如下：\n{qa_text}",
+                max_new_tokens=260
             )
-
-            summary = output_text[0].strip() if output_text else f"该生近期提问 {len(qa_list)} 次。"
+            if not summary:
+                summary = fallback_learning_summary(student_name, qa_list)
             
             # 更新数据库
             if student_user:
@@ -432,10 +486,23 @@ def get_question_stats():
             student_summaries[student_name] = summary
 
         except Exception as e:
-            student_summaries[student_name] = f"统计：共提问 {len(qa_list)} 次（分析生成失败）"
+            student_summaries[student_name] = fallback_learning_summary(student_name, qa_list)
 
     # 5. 返回结果
-    overall_summary = f"全班共有 {total_questions} 个问题，来自 {len(questions_by_student)} 位学生。"
+    if total_questions == 0:
+        overall_summary = "暂无学生提问数据，暂时无法形成具体学情分析。"
+    else:
+        class_digest = build_class_digest(questions_by_student)
+        try:
+            overall_summary = generate_ai_text(
+                "你是一位面向教师的学情分析助手。请根据全班问答记录，生成具体的班级学情分析，必须归纳知识点、共性困惑、学习能力表现和下一步教学建议。不要只说有几个学生、问了几个问题。用清晰的中文分段输出，可包含「知识点归纳」「共性问题」「教学建议」。",
+                f"全班共有 {total_questions} 个问题，来自 {len(questions_by_student)} 位学生。\n\n问答记录摘要：\n{class_digest}",
+                max_new_tokens=520
+            )
+            if not overall_summary:
+                overall_summary = fallback_class_summary(total_questions, questions_by_student)
+        except Exception as e:
+            overall_summary = fallback_class_summary(total_questions, questions_by_student)
     
     return flask.jsonify({
         "total_questions": total_questions,
@@ -443,6 +510,20 @@ def get_question_stats():
         "student_summaries": student_summaries,
         "summary": overall_summary
     }), 200
+
+@app.route("/api/messages/<int:msg_id>", methods=["DELETE"])
+@login_required
+def delete_message(msg_id):
+    msg = db.session.get(Message, msg_id)
+    if not msg:
+        return flask.jsonify({"error": "留言不存在"}), 404
+
+    if current_user.role != 'teacher' and msg.sender_id != current_user.id:
+        return flask.jsonify({"error": "权限不足"}), 403
+
+    db.session.delete(msg)
+    db.session.commit()
+    return flask.jsonify({"message": "删除成功"}), 200
 
 @app.route("/api/messages/<int:msg_id>/reply", methods=["POST"])
 @login_required
@@ -480,11 +561,19 @@ def submit_authoritative_answer(q_id):
 @app.route("/api/questions/<int:q_id>", methods=["DELETE"])
 @login_required
 def delete_question(q_id):
-    if current_user.role != 'teacher': return flask.jsonify({"error": "权限不足"}), 403
     q = db.session.get(Question, q_id)
-    if q:
-        db.session.delete(q)
-        db.session.commit()
+    if not q:
+        return flask.jsonify({"error": "问题不存在"}), 404
+
+    if current_user.role != 'teacher' and q.student_id != current_user.id:
+        return flask.jsonify({"error": "权限不足"}), 403
+
+    student = db.session.get(User, q.student_id)
+    db.session.delete(q)
+    if student:
+        student.learning_summary = None
+        student.summary_updated_at = None
+    db.session.commit()
     return flask.jsonify({"message": "删除成功"}), 200
 
 # ========================== 安全响应头中间件 ==========================

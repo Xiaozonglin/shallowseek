@@ -8,6 +8,7 @@ vlm_weights
 instance
 
 node_modules
+frontend/dist
 
 docs
 __pycache__

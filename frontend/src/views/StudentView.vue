@@ -80,6 +80,18 @@
 
           <transition name="soft-rise">
             <a-card v-if="streamingAnswer || answer" class="surface-card panel-card answer-panel" title="回答结果">
+              <template #extra>
+                <div class="answer-copy-toolbar">
+                  <a-radio-group v-model:value="copyMode" size="small" button-style="solid">
+                    <a-radio-button value="markdown">Markdown</a-radio-button>
+                    <a-radio-button value="plain">纯文本</a-radio-button>
+                  </a-radio-group>
+                  <a-button size="small" @click="copyAnswer" :disabled="!copyableAnswer">
+                    <template #icon><copy-outlined /></template>
+                    复制
+                  </a-button>
+                </div>
+              </template>
               <div v-if="streamingAnswer" class="answer-stream markdown-body" v-html="renderedStreamingAnswer"></div>
               <div v-else class="answer-body markdown-body" v-html="renderedAnswer"></div>
 
@@ -99,10 +111,23 @@
           <a-card class="surface-card panel-card" title="提问历史">
             <a-empty v-if="history.length === 0" description="还没有历史记录" />
             <TransitionGroup v-else name="stack-reveal" tag="div" class="history-stack">
-              <article v-for="(item, index) in history" :key="`${index}-${item.question}`" class="history-entry">
-                <div class="history-question">
-                  <span class="history-kicker">Q{{ index + 1 }}</span>
-                  <h3>{{ item.question }}</h3>
+              <article v-for="(item, index) in history" :key="item.id || `${index}-${item.question}`" class="history-entry">
+                <div class="record-head">
+                  <div class="history-question">
+                    <span class="history-kicker">Q{{ index + 1 }}</span>
+                    <h3>{{ item.question }}</h3>
+                  </div>
+                  <a-popconfirm
+                    title="确定删除这条提问记录吗？"
+                    ok-text="删除"
+                    cancel-text="取消"
+                    @confirm="deleteQuestionRecord(item)"
+                  >
+                    <a-button type="text" danger size="small" @click.stop>
+                      <template #icon><delete-outlined /></template>
+                      删除
+                    </a-button>
+                  </a-popconfirm>
                 </div>
                 <div class="history-answer markdown-body" v-html="renderHistoryAnswer(item.answer)"></div>
               </article>
@@ -152,9 +177,22 @@
               <article v-for="item in messages" :key="item.id" class="message-entry">
                 <div class="message-meta">
                   <span>{{ new Date(item.timestamp).toLocaleString('zh-CN') }}</span>
-                  <a-tag :color="item.status === 'replied' ? 'success' : 'default'">
-                    {{ item.status === 'replied' ? '已回复' : '待回复' }}
-                  </a-tag>
+                  <div class="message-actions">
+                    <a-tag :color="item.status === 'replied' ? 'success' : 'default'">
+                      {{ item.status === 'replied' ? '已回复' : '待回复' }}
+                    </a-tag>
+                    <a-popconfirm
+                      title="确定删除这条留言记录吗？"
+                      ok-text="删除"
+                      cancel-text="取消"
+                      @confirm="deleteMessageRecord(item)"
+                    >
+                      <a-button type="text" danger size="small" @click.stop>
+                        <template #icon><delete-outlined /></template>
+                        删除
+                      </a-button>
+                    </a-popconfirm>
+                  </div>
                 </div>
                 <p class="message-content">{{ item.content }}</p>
 
@@ -180,10 +218,16 @@ import axios from 'axios'
 import { marked } from 'marked'
 import katex from 'katex'
 import 'katex/dist/katex.min.css'
-import { UploadOutlined } from '@ant-design/icons-vue'
+import { message as toast } from 'ant-design-vue'
+import { CopyOutlined, DeleteOutlined, UploadOutlined } from '@ant-design/icons-vue'
 
 export default {
   name: 'StudentView',
+  components: {
+    CopyOutlined,
+    DeleteOutlined,
+    UploadOutlined
+  },
   setup() {
     const question = ref('')
     const answer = ref('')
@@ -196,6 +240,7 @@ export default {
     const sendingMessage = ref(false)
     const messageSuccess = ref(false)
     const uploadedImage = ref('')
+    const copyMode = ref('markdown')
 
     marked.setOptions({
       breaks: true,
@@ -250,9 +295,50 @@ export default {
       return marked(renderLatex(sanitizeAnswer(streamingAnswer.value)))
     })
 
+    const copyableAnswer = computed(() => sanitizeAnswer(answer.value || streamingAnswer.value || ''))
+
     const renderHistoryAnswer = (content) => {
       if (!content) return ''
       return marked(renderLatex(sanitizeAnswer(content)))
+    }
+
+    const markdownToPlainText = (content) => {
+      const target = document.createElement('div')
+      target.innerHTML = marked(renderLatex(sanitizeAnswer(content)))
+      return (target.textContent || target.innerText || '').replace(/\n{3,}/g, '\n\n').trim()
+    }
+
+    const writeClipboard = async (text) => {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text)
+        return
+      }
+
+      const textarea = document.createElement('textarea')
+      textarea.value = text
+      textarea.setAttribute('readonly', '')
+      textarea.style.position = 'fixed'
+      textarea.style.opacity = '0'
+      document.body.appendChild(textarea)
+      textarea.select()
+      document.execCommand('copy')
+      document.body.removeChild(textarea)
+    }
+
+    const copyAnswer = async () => {
+      if (!copyableAnswer.value) return
+
+      try {
+        const text =
+          copyMode.value === 'markdown'
+            ? copyableAnswer.value
+            : markdownToPlainText(copyableAnswer.value)
+        await writeClipboard(text)
+        toast.success(copyMode.value === 'markdown' ? '已复制 Markdown 回答' : '已复制纯文本回答')
+      } catch (error) {
+        console.error('复制回答失败:', error)
+        toast.error('复制失败，请稍后重试')
+      }
     }
 
     const handleImageUpload = (file) =>
@@ -319,10 +405,7 @@ export default {
 
         await readStreamingResponse(response)
         answer.value = streamingAnswer.value
-        history.value.unshift({
-          question: '[图片分析]',
-          answer: streamingAnswer.value
-        })
+        await fetchQuestionHistory()
       } catch (error) {
         console.error('图片分析失败:', error)
         alert('图片分析失败，请稍后重试。')
@@ -354,10 +437,7 @@ export default {
 
         await readStreamingResponse(response)
         answer.value = streamingAnswer.value
-        history.value.unshift({
-          question: question.value || '[图片分析]',
-          answer: streamingAnswer.value
-        })
+        await fetchQuestionHistory()
         question.value = ''
         removeImage()
       } catch (error) {
@@ -399,8 +479,10 @@ export default {
       try {
         const response = await axios.get('/api/student/questions/history')
         history.value = response.data.map((item) => ({
+          id: item.id,
           question: item.question,
-          answer: item.answer
+          answer: item.answer,
+          timestamp: item.timestamp
         }))
       } catch (error) {
         console.error('加载提问历史失败:', error)
@@ -413,6 +495,32 @@ export default {
         messages.value = response.data
       } catch (error) {
         console.error('加载留言历史失败:', error)
+      }
+    }
+
+    const deleteQuestionRecord = async (item) => {
+      if (!item.id) return
+
+      try {
+        await axios.delete(`/api/questions/${item.id}`)
+        history.value = history.value.filter((record) => record.id !== item.id)
+        toast.success('提问记录已删除')
+      } catch (error) {
+        console.error('删除提问记录失败:', error)
+        toast.error(error.response?.data?.error || '删除失败，请稍后重试')
+      }
+    }
+
+    const deleteMessageRecord = async (item) => {
+      if (!item.id) return
+
+      try {
+        await axios.delete(`/api/messages/${item.id}`)
+        messages.value = messages.value.filter((record) => record.id !== item.id)
+        toast.success('留言记录已删除')
+      } catch (error) {
+        console.error('删除留言记录失败:', error)
+        toast.error(error.response?.data?.error || '删除失败，请稍后重试')
       }
     }
 
@@ -433,12 +541,19 @@ export default {
       sendingMessage,
       messageSuccess,
       uploadedImage,
+      copyMode,
       UploadOutlined,
+      CopyOutlined,
+      DeleteOutlined,
       submitQuestion,
       sendMessageToTeacher,
       handleImageUpload,
       removeImage,
       analyzeImageOnly,
+      copyAnswer,
+      deleteQuestionRecord,
+      deleteMessageRecord,
+      copyableAnswer,
       renderedAnswer,
       renderedStreamingAnswer,
       renderHistoryAnswer
@@ -604,6 +719,13 @@ export default {
   flex-wrap: wrap;
 }
 
+.answer-copy-toolbar {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
 .answer-panel :deep(.ant-card-body) {
   display: grid;
   gap: 20px;
@@ -664,8 +786,21 @@ export default {
   background: rgba(255, 255, 255, 0.045);
 }
 
+.record-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+  margin-bottom: 18px;
+}
+
 .history-question {
   margin-bottom: 18px;
+  min-width: 0;
+}
+
+.record-head .history-question {
+  margin-bottom: 0;
 }
 
 .history-kicker {
@@ -696,6 +831,13 @@ export default {
   margin-bottom: 10px;
   color: rgba(255, 255, 255, 0.42);
   font-size: 12px;
+}
+
+.message-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
 }
 
 .message-content {
@@ -873,6 +1015,7 @@ export default {
 
   .upload-row,
   .action-row,
+  .answer-copy-toolbar,
   .message-meta {
     flex-direction: column;
     align-items: flex-start;
