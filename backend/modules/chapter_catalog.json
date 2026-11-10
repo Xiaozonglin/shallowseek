@@ -1,0 +1,20 @@
+{
+  "preface": { "title": "前言", "path": "chapter_preface" },
+  "introduction": { "title": "初识算法", "path": "chapter_introduction" },
+  "computational_complexity": { "title": "复杂度分析", "path": "chapter_computational_complexity" },
+  "data_structure": { "title": "数据结构", "path": "chapter_data_structure" },
+  "array_and_linkedlist": { "title": "数组与链表", "path": "chapter_array_and_linkedlist" },
+  "stack_and_queue": { "title": "栈与队列", "path": "chapter_stack_and_queue" },
+  "hashing": { "title": "哈希表", "path": "chapter_hashing" },
+  "tree": { "title": "树", "path": "chapter_tree" },
+  "heap": { "title": "堆", "path": "chapter_heap" },
+  "graph": { "title": "图", "path": "chapter_graph" },
+  "searching": { "title": "搜索", "path": "chapter_searching" },
+  "sorting": { "title": "排序", "path": "chapter_sorting" },
+  "divide_and_conquer": { "title": "分治", "path": "chapter_divide_and_conquer" },
+  "backtracking": { "title": "回溯", "path": "chapter_backtracking" },
+  "dynamic_programming": { "title": "动态规划", "path": "chapter_dynamic_programming" },
+  "greedy": { "title": "贪心", "path": "chapter_greedy" },
+  "hello_algo": { "title": "Hello 算法", "path": "chapter_hello_algo" },
+  "paperbook": { "title": "纸质书", "path": "chapter_paperbook" }
+}
