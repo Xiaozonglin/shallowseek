@@ -1,6 +1,7 @@
 import os
 import json
 import re
+import time as _time
 import base64
 import logging
 from datetime import datetime, timedelta
@@ -97,6 +98,10 @@ class Question(db.Model):
     teacher_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=True)
     student_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     timestamp = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+    # 智能 UI / Agent：卡片与工具轨迹（演示版新增列，旧库启动时自动补齐）
+    ui_json = db.Column(db.Text, nullable=True)
+    trace_json = db.Column(db.Text, nullable=True)
+    mode = db.Column(db.String(10), default='fast')
 
 
 class Message(db.Model):
@@ -111,9 +116,11 @@ class Message(db.Model):
 
 # ========================== AI 引擎（DeepSeek API，无本地模型） ==========================
 from modules.ai import AIEngine
+from modules.agent import AgentRuntime
 
 # 全局初始化 AI 引擎：未配置 DEEPSEEK_API_KEY 时会直接抛错，便于尽早暴露配置问题
 ai = AIEngine()
+agent_runtime = AgentRuntime(ai)
 
 # ========================== 业务辅助函数 ==========================
 def get_user_history(user_id):
@@ -248,68 +255,207 @@ def check_auth():
 def get_student_question_history():
     if current_user.role != 'student': return flask.jsonify({"error": "权限不足"}), 403
     questions = Question.query.filter_by(student_id=current_user.id).order_by(Question.timestamp.desc()).limit(50).all()
-    return flask.jsonify([{"id": q.id, "question": q.content, "answer": q.answer, "authoritative_answer": q.authoritative_answer, "timestamp": q.timestamp.isoformat()} for q in questions]), 200
 
-# ========================== 核心 AI 问答路由 (多模态升级版) ==========================
+    def _load(raw):
+        if not raw:
+            return None
+        try:
+            return json.loads(raw)
+        except (TypeError, ValueError):
+            return None
+
+    return flask.jsonify([
+        {
+            "id": q.id,
+            "question": q.content,
+            "answer": q.answer,
+            "authoritative_answer": q.authoritative_answer,
+            "timestamp": q.timestamp.isoformat(),
+            "mode": q.mode or "fast",
+            "ui": _load(q.ui_json),
+            "trace": _load(q.trace_json),
+        }
+        for q in questions
+    ]), 200
+
+
+@app.route("/api/agent/meta", methods=["GET"])
+@login_required
+def get_agent_meta():
+    """前端启动时读取：卡片协议版本、可选模式、相关章节目录。"""
+    from modules.agent import available_chapter_payload
+    return flask.jsonify({
+        "uiVersion": 1,
+        "modes": ["fast", "deep"],
+        "chapters": available_chapter_payload(),
+    }), 200
+
+
+# ========================== 核心 AI 问答路由（快答 / 深度 Agent + 智能 UI） ==========================
+QA_MODES = {"fast", "deep"}
+
+
+def _sse(payload):
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+def _save_question(student_id, content_text, answer_text, ui_payload=None, trace_payload=None, mode="fast"):
+    with app.app_context():
+        record = Question(
+            content=content_text,
+            answer=(answer_text or "").strip(),
+            student_id=student_id,
+            ui_json=json.dumps(ui_payload, ensure_ascii=False) if ui_payload else None,
+            trace_json=json.dumps(trace_payload, ensure_ascii=False) if trace_payload else None,
+            mode=mode,
+        )
+        db.session.add(record)
+        db.session.commit()
+        return record.id
+
+
+def _build_fast_prompt(student_id, query, image_base64):
+    """快答模式上下文：教师权威答案 + BM25 检索 + 最近历史（无工具循环）。"""
+    context = ""
+    history_text = get_user_history(student_id)
+    if query:
+        if not image_base64:
+            context += ai.safe_math(query)
+        context += get_authoritative_context(query)
+        context += ai.retrieve_context(query)
+
+    system_content = (
+        "你是专业的学习助手。请根据提供的资料、上下文或图片准确回答用户问题。"
+        "如果用户上传了图片，请精确识别其中的文字、公式或逻辑结构并进行解答。"
+    )
+    if context:
+        system_content += f"\n\n背景上下文:\n{context}"
+    if history_text:
+        system_content += f"\n\n历史对话记录:\n{history_text}"
+
+    image_data_url = ai.to_data_url(image_base64) if image_base64 else None
+    final_query = query or "请详细提取和描述这张图片中的所有关键信息、数字与文字。"
+    return system_content, final_query, image_data_url
+
+
+def _legacy_fast_stream(student_id, query, image_base64):
+    """旧客户端（不传 uiVersion）：保持 data:{"token"} 契约，纯文本流式。"""
+    full_answer = ""
+    try:
+        system_content, final_query, image_data_url = _build_fast_prompt(student_id, query, image_base64)
+        for token in ai.stream_answer(system_content, final_query, image_data_url=image_data_url):
+            full_answer += token
+            yield f"data: {json.dumps({'token': token})}\n\n"
+
+        db_content = f"[图像] {query[:50]}" if image_base64 else query
+        _save_question(student_id, db_content, full_answer, mode="fast")
+        yield f"data: {json.dumps({'done': True})}\n\n"
+    except Exception as exc:
+        logger.exception("AI 回答失败")
+        yield f"data: {json.dumps({'error': ai.friendly_error(exc)}, ensure_ascii=False)}\n\n"
+
+
+def _typed_fast_stream(student_id, query, image_base64):
+    """新客户端 + 快答：统一事件协议，无工具、无卡片。"""
+    answer = ""
+    started = _time.monotonic()
+    try:
+        yield _sse({"type": "start", "mode": "fast", "uiVersion": 1})
+        yield _sse({"type": "status", "stage": "answer", "message": "正在生成回答…"})
+        system_content, final_query, image_data_url = _build_fast_prompt(student_id, query, image_base64)
+        for token in ai.stream_answer(system_content, final_query, image_data_url=image_data_url):
+            answer += token
+            yield _sse({"type": "answer_delta", "text": token})
+
+        duration_ms = int((_time.monotonic() - started) * 1000)
+        trace_payload = {"trace": [], "sources": [], "durationMs": duration_ms, "mode": "fast"}
+        yield _sse({"type": "complete", "answer": answer, "sources": [], "trace": [], "durationMs": duration_ms, "mode": "fast"})
+        db_content = f"[图像] {query[:50]}" if image_base64 else query
+        record_id = _save_question(student_id, db_content, answer, trace_payload=trace_payload, mode="fast")
+        yield _sse({"type": "done", "saved": True, "messageId": record_id, "mode": "fast"})
+    except Exception as exc:
+        logger.exception("AI 回答失败")
+        yield _sse({"type": "error", "code": "ai_error", "message": ai.friendly_error(exc)})
+
+
+def _typed_deep_stream(student_id, query):
+    """新客户端 + 深度：进程内 Agent 工具循环，流式事件 + 卡片。"""
+    answer = ""
+    saved_ui = None
+    completed = None
+    failed = False
+    try:
+        yield _sse({"type": "start", "mode": "deep", "uiVersion": 1})
+        history_text = get_user_history(student_id)
+        for event in agent_runtime.run(query, history_text=history_text, ui_enabled=True):
+            event_type = event.get("type")
+            if event_type == "answer_delta":
+                answer += event.get("text", "")
+            elif event_type == "answer_reset":
+                answer = ""
+            elif event_type == "ui":
+                saved_ui = event.get("ui")
+            elif event_type == "complete":
+                completed = event
+                answer = event.get("answer") or answer
+            elif event_type == "error":
+                failed = True
+            yield _sse(event)
+
+        if failed or completed is None:
+            return
+
+        trace_payload = {
+            "trace": completed.get("trace", []),
+            "sources": completed.get("sources", []),
+            "durationMs": completed.get("durationMs", 0),
+            "mode": "deep",
+        }
+        record_id = _save_question(
+            student_id, query, answer, ui_payload=saved_ui, trace_payload=trace_payload, mode="deep"
+        )
+        yield _sse({"type": "done", "saved": True, "messageId": record_id, "ui": saved_ui, "mode": "deep"})
+    except Exception as exc:
+        logger.exception("Agent 回答失败")
+        yield _sse({"type": "error", "code": "ai_error", "message": ai.friendly_error(exc)})
+
+
 @app.route("/api/qa", methods=["POST"])
 @app.route("/api/multimodal/qa", methods=["POST"])
 @login_required
 @rate_limit(limit=10)
 def handle_qa():
-    data = flask.request.json
-    query = sanitize_input(data.get('question', ''))
-    image_base64 = data.get('image')
-    
+    data = flask.request.get_json(silent=True) or {}
+    query = sanitize_input(data.get("question", ""))
+    image_base64 = data.get("image")
+
     if not query and not image_base64:
         return flask.jsonify({"error": "请求内容为空"}), 400
 
-    def generate():
-        full_answer = ""
-        try:
-            context = ""
-            history_text = get_user_history(current_user.id)
+    mode = str(data.get("mode") or "fast").strip().lower()
+    if mode not in QA_MODES:
+        return flask.jsonify({"error": "不支持的问答模式"}), 400
 
-            # 1. 组装上下文：数学工具 + 教师权威答案 + 本地知识库检索
-            if query:
-                if not image_base64:
-                    context += ai.safe_math(query)
-                context += get_authoritative_context(query)
-                context += ai.retrieve_context(query)
+    try:
+        ui_version = int(data.get("uiVersion") or 0)
+    except (TypeError, ValueError):
+        ui_version = 0
 
-            system_content = (
-                "你是专业的学习助手。请根据提供的资料、上下文或图片准确回答用户问题。"
-                "如果用户上传了图片，请精确识别其中的文字、公式或逻辑结构并进行解答。"
-            )
-            if context:
-                system_content += f"\n\n背景上下文:\n{context}"
-            if history_text:
-                system_content += f"\n\n历史对话记录:\n{history_text}"
+    student_id = current_user.id
+    typed = ui_version == 1
 
-            image_data_url = ai.to_data_url(image_base64) if image_base64 else None
-            final_query = query or "请详细提取和描述这张图片中的所有关键信息、数字与文字。"
+    if typed and mode == "deep" and not image_base64:
+        stream = _typed_deep_stream(student_id, query)
+    elif typed:
+        stream = _typed_fast_stream(student_id, query, image_base64)
+    else:
+        stream = _legacy_fast_stream(student_id, query, image_base64)
 
-            # 2. DeepSeek API 流式输出，保持前端 `data: {"token": ...}` 契约不变
-            for token in ai.stream_answer(system_content, final_query, image_data_url=image_data_url):
-                full_answer += token
-                yield f"data: {json.dumps({'token': token})}\n\n"
+    response = Response(stream_with_context(stream), mimetype="text/event-stream")
+    response.headers["Cache-Control"] = "no-cache"
+    response.headers["X-Accel-Buffering"] = "no"
+    return response
 
-            # 3. 流结束后落库
-            with app.app_context():
-                db_content = f"[图像] {query[:50]}" if image_base64 else query
-                db.session.add(Question(
-                    content=db_content,
-                    answer=full_answer.strip(),
-                    student_id=current_user.id,
-                ))
-                db.session.commit()
-
-            yield f"data: {json.dumps({'done': True})}\n\n"
-
-        except Exception as exc:
-            logger.exception("AI 回答失败")
-            yield f"data: {json.dumps({'error': ai.friendly_error(exc)})}\n\n"
-
-    return Response(stream_with_context(generate()), mimetype='text/event-stream')
 
 @app.route("/api/upload/image", methods=["POST"])
 @login_required
@@ -537,9 +683,24 @@ def add_security_headers(response):
     return response
 
 # ========================== 应用启动 ==========================
-if __name__ == "__main__":
+def ensure_schema():
+    """演示版轻量迁移：为已有演示库补齐 question 新列（不引入迁移框架）。"""
+    from sqlalchemy import inspect, text as sql_text
     with app.app_context():
         db.create_all()
+        inspector = inspect(db.engine)
+        if "question" not in inspector.get_table_names():
+            return
+        columns = {column["name"] for column in inspector.get_columns("question")}
+        additions = {"ui_json": "TEXT", "trace_json": "TEXT", "mode": "VARCHAR(10)"}
+        with db.engine.begin() as connection:
+            for name, ddl in additions.items():
+                if name not in columns:
+                    connection.execute(sql_text(f"ALTER TABLE question ADD COLUMN {name} {ddl}"))
+
+
+if __name__ == "__main__":
+    ensure_schema()
     
     print("\n✅ 系统启动成功！")
     print(f"🤖 AI 服务: DeepSeek API（{os.getenv('DEEPSEEK_MODEL', 'deepseek-flash')}），不加载本地模型。")
