@@ -4,6 +4,18 @@
 > 约束：**zhixing（`~/github/xdu-zhixing`）全程只读**，不写入、不复制其仓库文件；所有改动只落在 XDWe（`~/github/shallowseek`）。
 > 本计划把上一轮的 DeepSeek 迁移补丁与本轮的 Agent/卡片迁移合并为一条交付线，按 4 个阶段、约 20 个子任务执行。
 
+## 实施进度
+
+| 阶段 | 状态 | 分支 | PR |
+|---|---|---|---|
+| Phase 0：DeepSeek API 基线 | ✅ 已合并 | `feat/deepseek-baseline` | [#1](https://github.com/Xiaozonglin/shallowseek/pull/1) |
+| Phase 1：进程内 Agent 与卡片数据 | ✅ 已合并 | `feat/agent-runtime` | [#2](https://github.com/Xiaozonglin/shallowseek/pull/2) |
+| Phase 2：智能 UI 卡片与交互 | ✅ 已合并 | `feat/intelligent-ui` | [#3](https://github.com/Xiaozonglin/shallowseek/pull/3) |
+| Phase 3：演示打磨（提示词/题库/兜底/runbook） | 🔄 进行中 | `feat/demo-polish` | — |
+| Phase 4：可选扩展 | ⏸ 未开始 | — | — |
+
+> 快答/深度切换已随 Phase 2 一并交付（原计划 T3.4）。
+
 ---
 
 ## 1. 目标与原则

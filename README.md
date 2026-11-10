@@ -20,9 +20,10 @@
 - 前端：Vue.js 3.x + Ant Design Vue，负责页面渲染与用户交互，通过 Axios / fetch 调用后端 RESTful API；
 - 后端：Flask 框架提供 API 接口，Flask-Login 管理会话认证，SQLAlchemy 操作 SQLite 数据库；
 - AI 服务：调用 **DeepSeek API**（`deepseek-flash`，OpenAI 兼容协议，支持文本与图片理解、SSE 流式输出），**不加载任何本地大模型**，无需 GPU 与模型权重；
-- 知识检索：jieba 分词 + BM25 词法检索，索引由 `backend/build_index.py` 在本地生成（演示场景可跳过，跳过时自动关闭检索）。
+- 知识检索：jieba 分词 + BM25 词法检索，索引由 `backend/build_index.py` 在本地生成（演示场景可跳过，跳过时自动关闭检索）；
+- **Agent / 智能 UI**：深度模式在进程内跑 DeepSeek function-calling 工具循环（检索、读原文、计算、提交卡片），以 SSE 事件流输出过程与卡片；前端渲染「参考资料 / 解题步骤 / 相关章节」三类卡片。设计决策见 `migration/ADR-001-agent-ui-architecture.md`，演示题库见 `migration/DEMO_QA.md`。
 
-> 与旧版本的差异：已移除本地 Qwen3-VL / BGE / FAISS / PyTorch 方案，图片问答改由 DeepSeek 视觉能力完成，详情见 `migration/MIGRATION_REVIEW.md`。
+> 与旧版本的差异：已移除本地 Qwen3-VL / BGE / FAISS / PyTorch 方案，图片问答改由 DeepSeek 视觉能力完成，并吸收了 xdu-zhixing 的 Agent / 卡片化回答思路，详情见 `migration/MIGRATION_REVIEW.md` 与 `migration/AGENT_UI_MIGRATION_PLAN.md`。
 
 ## 目录结构
 
@@ -35,11 +36,18 @@
 │  │  main.py // Flask 主文件
 │  │  build_index.py // 构建 BM25 词法索引
 │  │  smoke_deepseek.py // 冒烟测试：验证 API Key 与流式输出
+│  │  smoke_agent.py // 冒烟测试：验证深度模式 Agent 工具循环与卡片
 │  │
 │  ├─modules
 │  │      ai.py // DeepSeek API 封装（AIEngine）
+│  │      agent.py // 进程内 Agent 运行时（工具循环 + 事件流）
+│  │      agent_tools.py // 检索/读原文/计算/提交卡片工具与引用注册表
+│  │      agent_prompts.py // 深度模式提示词
+│  │      ui_cards.py // 卡片协议与校验
+│  │      chapter_catalog.json // 相关章节卡使用的固定章节目录
 │  │      retrieval.py // 词法检索与短文本相似度
 │  │
+│  ├─tests // 离线测试（卡片协议 / Agent / 事件流）
 │  ├─bm25_index // 由 build_index.py 生成的本地索引（gitignore）
 │  └─instance // 数据库（gitignore）
 │
@@ -53,8 +61,12 @@
 │  └─src
 │      │  App.vue
 │      │  main.js
+│      ├─components
+│      │      ToolTrace.vue // 工具执行过程折叠面板
+│      │      cards // 智能 UI 卡片组件（参考/步骤/章节/引用）
 │      ├─router // 路由
 │      ├─stores
+│      ├─utils // SSE 事件流解析、卡片校验
 │      └─views // Vue 视图
 ```
 
@@ -86,6 +98,9 @@ python build_index.py --query 二分查找
 # 冒烟测试（不需要启动 Flask）
 python smoke_deepseek.py
 
+# 深度模式冒烟（可选：验证 Agent 工具循环与卡片生成）
+python smoke_agent.py
+
 # 启动后端
 python main.py                    # http://127.0.0.1:5000
 ```
@@ -102,9 +117,26 @@ npm run dev                       # http://127.0.0.1:5173
 
 ### 3. 演示提示
 
+- **快答 / 深度**：输入框上方可切换；快答只做一次文字回答（更快），深度走 Agent 工具循环并可能生成卡片；
+- **智能 UI**：深度模式下可能生成「参考资料 / 解题步骤 / 相关章节」三类卡片，可筛选、展开、勾选（仅本页进度）与「追问这一步」；
+- **执行过程**：回答下方的折叠面板展示本轮工具调用与耗时，便于演示 Agent 的检索过程；
 - 教师账号：在注册页选择「教师」角色即可（仅演示用；生产环境应改为审核/邀请制）；
 - 想看到「教师权威答案回流」：先用同一个问题或近义问法再问一次（词法匹配阈值见 `.env` 的 `AUTHORITATIVE_SIM_THRESHOLD`）；
 - 教师端「学情分析」首次打开会实时调用模型生成，稍等几秒（24 小时缓存）。
+
+演示题库、通过标准与失败兜底见 `migration/DEMO_QA.md`，完整演示流程见 `migration/demo-runbook.md`。
+
+### 4. 测试与构建验证
+
+```bash
+# 后端离线测试（不调用真实 API）
+cd backend
+PYTHONPATH=. python -m unittest discover -s tests -v
+
+# 前端构建验证
+cd ../frontend
+npm run build
+```
 
 ## 配置说明
 
@@ -120,6 +152,9 @@ npm run dev                       # http://127.0.0.1:5173
 | `DEEPSEEK_MODEL` | 模型名（`deepseek-flash` 支持图片） | `deepseek-flash` |
 | `DEEPSEEK_THINKING` | 思考模式开关：`disabled` / `enabled` | `disabled` |
 | `DEEPSEEK_MAX_TOKENS` | 单次回答最大输出 token | `1024` |
+| `AGENT_MAX_ROUNDS` | 深度模式最多模型请求轮次 | `6` |
+| `AGENT_TIMEOUT_SECONDS` | 深度模式单轮整体超时（秒） | `50` |
+| `AGENT_MAX_OUTPUT_TOKENS` | 深度模式单次调用输出上限 | `2048` |
 | `AUTHORITATIVE_SIM_THRESHOLD` | 权威答案词法匹配阈值（0~1） | `0.45` |
 
 ## 安全提示
