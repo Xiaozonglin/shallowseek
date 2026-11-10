@@ -358,33 +358,60 @@ export default {
 
     const readStreamingResponse = async (response) => {
       if (!response.ok || !response.body) {
-        throw new Error(`HTTP error! status: ${response.status}`)
+        let detail = ''
+        try {
+          const payload = await response.json()
+          detail = payload.error || payload.message || ''
+        } catch {
+          // 非 JSON 错误体（如网关错误页），忽略
+        }
+        throw new Error(detail || `HTTP error! status: ${response.status}`)
       }
 
       const reader = response.body.getReader()
       const decoder = new TextDecoder()
+      let buffer = ''
+      let serverError = ''
+
+      const handleLine = (line) => {
+        if (!line.startsWith('data: ')) return
+        try {
+          const data = JSON.parse(line.slice(6))
+          if (data.error) {
+            serverError = data.error
+            return
+          }
+          if (data.token) {
+            const token = sanitizeAnswer(data.token)
+            if (token) {
+              streamingAnswer.value += token
+            }
+          }
+        } catch (error) {
+          console.warn('解析流式数据失败:', error)
+        }
+      }
 
       while (true) {
         const { done, value } = await reader.read()
         if (done) break
 
-        const chunk = decoder.decode(value)
-        const lines = chunk.split('\n')
-
+        // 保留跨 chunk 的半行，避免 TCP 分片导致 JSON 解析失败、丢 token
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() ?? ''
         for (const line of lines) {
-          if (!line.startsWith('data: ')) continue
-          try {
-            const data = JSON.parse(line.slice(6))
-            if (data.token) {
-              const token = sanitizeAnswer(data.token)
-              if (token) {
-                streamingAnswer.value += token
-              }
-            }
-          } catch (error) {
-            console.warn('解析流式数据失败:', error)
-          }
+          handleLine(line)
         }
+      }
+
+      buffer += decoder.decode()
+      if (buffer) {
+        handleLine(buffer)
+      }
+
+      if (serverError) {
+        throw new Error(serverError)
       }
     }
 
@@ -407,8 +434,10 @@ export default {
         answer.value = streamingAnswer.value
         await fetchQuestionHistory()
       } catch (error) {
+        // 保留已生成的部分回答，避免网络中断时内容凭空消失
+        answer.value = streamingAnswer.value || ''
         console.error('图片分析失败:', error)
-        alert('图片分析失败，请稍后重试。')
+        alert(error.message || '图片分析失败，请稍后重试。')
       } finally {
         loading.value = false
         streamingAnswer.value = ''
@@ -441,8 +470,10 @@ export default {
         question.value = ''
         removeImage()
       } catch (error) {
+        // 保留已生成的部分回答，避免网络中断时内容凭空消失
+        answer.value = streamingAnswer.value || ''
         console.error('提问失败:', error)
-        alert('提问失败，请检查网络或稍后重试。')
+        alert(error.message || '提问失败，请检查网络或稍后重试。')
       } finally {
         loading.value = false
         streamingAnswer.value = ''

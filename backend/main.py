@@ -1,15 +1,12 @@
 import os
 import json
 import re
-import torch
-import threading
 import base64
-import io
+import logging
 from datetime import datetime, timedelta
 from functools import wraps
 from collections import defaultdict
 from time import time
-from PIL import Image
 
 import flask
 from flask import Response, stream_with_context
@@ -18,15 +15,12 @@ from flask_bcrypt import Bcrypt
 from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
 from flask_mail import Mail, Message as MailMessage
 
-from langchain_community.document_loaders import DirectoryLoader, TextLoader, PyMuPDFLoader, UnstructuredImageLoader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.vectorstores import FAISS
-from langchain_huggingface import HuggingFaceEmbeddings
-from sentence_transformers import SentenceTransformer, util
-
 # ========================== 基础与安全配置 ==========================
 from dotenv import load_dotenv
 load_dotenv()
+
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
 
 app = flask.Flask(__name__)
 app.config.update(
@@ -115,10 +109,10 @@ class Message(db.Model):
     reply_timestamp = db.Column(db.DateTime, nullable=True)
     replier_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=True)
 
-# ========================== AI 引擎封装 (统一多模态架构) ==========================
+# ========================== AI 引擎（DeepSeek API，无本地模型） ==========================
 from modules.ai import AIEngine
 
-# 全局初始化 AI 引擎
+# 全局初始化 AI 引擎：未配置 DEEPSEEK_API_KEY 时会直接抛错，便于尽早暴露配置问题
 ai = AIEngine()
 
 # ========================== 业务辅助函数 ==========================
@@ -127,24 +121,27 @@ def get_user_history(user_id):
     records.reverse()
     return "\n".join([f"问：{r.content}\n答：{r.answer}" for r in records])
 
+AUTHORITATIVE_SIM_THRESHOLD = float(os.getenv("AUTHORITATIVE_SIM_THRESHOLD", "0.45"))
+
+
 def get_authoritative_context(query):
+    """在教师权威答案中找与当前提问最接近的一条（词法相似度）。"""
     questions = Question.query.filter(Question.authoritative_answer.isnot(None)).all()
-    if not questions: return ""
-    
-    query_vec = ai.embeddings.embed_query(query)
-    best_match, best_sim = None, 0.75
-    
-    for q in questions:
-        q_vec = ai.embeddings.embed_query(q.content)
-        sim = util.cos_sim(query_vec, q_vec).item()
+    if not questions:
+        return ""
+
+    best_match, best_sim = None, AUTHORITATIVE_SIM_THRESHOLD
+    for question in questions:
+        sim = ai.text_similarity(query, question.content)
         if sim > best_sim:
-            best_sim, best_match = sim, q
-            
+            best_sim, best_match = sim, question
+
     if best_match:
         teacher = db.session.get(User, best_match.teacher_id)
-        t_name = teacher.username if teacher else "老师"
-        return f"\n【历史权威参考】来自{t_name}的解答：\n{best_match.authoritative_answer}\n"
+        teacher_name = teacher.username if teacher else "老师"
+        return f"\n【历史权威参考】来自{teacher_name}的解答：\n{best_match.authoritative_answer}\n"
     return ""
+
 
 def truncate_for_prompt(text, max_chars=220):
     if not text:
@@ -153,40 +150,9 @@ def truncate_for_prompt(text, max_chars=220):
     return text[:max_chars] + ("..." if len(text) > max_chars else "")
 
 def generate_ai_text(system_prompt, user_prompt, max_new_tokens=360):
-    messages = [
-        {
-            "role": "system",
-            "content": [{"type": "text", "text": system_prompt}]
-        },
-        {
-            "role": "user",
-            "content": [{"type": "text", "text": user_prompt}]
-        }
-    ]
+    """非流式生成（学情分析等场景），由 DeepSeek API 完成。"""
+    return ai.generate_text(system_prompt, user_prompt, max_tokens=max_new_tokens)
 
-    inputs = ai._build_inputs_from_messages(messages)
-
-    with torch.inference_mode():
-        generated_ids = ai.llm.generate(
-            **inputs,
-            max_new_tokens=max_new_tokens,
-            temperature=0.65,
-            do_sample=True,
-            pad_token_id=ai.processor.tokenizer.eos_token_id
-        )
-
-    generated_ids_trimmed = [
-        out_ids[len(in_ids):]
-        for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
-    ]
-
-    output_text = ai.processor.batch_decode(
-        generated_ids_trimmed,
-        skip_special_tokens=True,
-        clean_up_tokenization_spaces=False
-    )
-
-    return output_text[0].strip() if output_text else ""
 
 def build_qa_digest(qa_list, max_items=8, answer_chars=180):
     lines = []
@@ -298,71 +264,50 @@ def handle_qa():
         return flask.jsonify({"error": "请求内容为空"}), 400
 
     def generate():
-        context = ""
-        history_text = get_user_history(current_user.id)
-        
-        # 1. 文本 RAG 检索体系 (针对存在文字问题的场景)
-        if query:
-            if not image_base64:
-                context += ai.safe_math(query)
-            context += get_authoritative_context(query)
-            
-            if ai.retriever:
-                docs = ai.retriever.invoke(query)
-                unique_docs = list({d.page_content for d in docs})
-                if unique_docs:
-                    context += "\n【本地参考资料】:\n" + "\n---\n".join(unique_docs)
-
-        # 2. 组装 Qwen-VL 原生消息体结构
-        system_content = "你是专业的学习助手。请根据提供的资料、上下文或图片准确回答用户问题。如果用户上传了图片，请精确识别其中的文字、公式或逻辑结构并进行解答。"
-        if context:
-            system_content += f"\n\n背景上下文:\n{context}"
-        if history_text:
-            system_content += f"\n\n历史对话记录:\n{history_text}"
-
-        messages = [
-            {"role": "system", "content": system_content}
-        ]
-
-        # 构建 User 消息，支持纯文本或图文混排
-        user_content = []
-        if image_base64:
-            # 补齐 base64 头部以满足 qwen_vl_utils 要求
-            img_url = f"data:image/jpeg;base64,{image_base64}" if not image_base64.startswith("data:image") else image_base64
-            user_content.append({"type": "image", "image": img_url})
-            
-        final_query = query if query else "请详细提取和描述这张图片中的所有关键信息、数字与文字。"
-        user_content.append({"type": "text", "text": final_query})
-        
-        messages.append({"role": "user", "content": user_content})
-
-        # 3. 数据预处理
-        streamer, generation_kwargs = ai.stream_generate_from_messages(
-            messages,
-            max_new_tokens=1024,
-            temperature=0.7,
-            top_p=0.9,
-     )
-            
-            
-            # 使用子线程推理防止阻塞 Flask 事件循环
-        thread = threading.Thread(target=ai.llm.generate, kwargs=generation_kwargs)
-        thread.start()
-
         full_answer = ""
-        for token in streamer:
+        try:
+            context = ""
+            history_text = get_user_history(current_user.id)
+
+            # 1. 组装上下文：数学工具 + 教师权威答案 + 本地知识库检索
+            if query:
+                if not image_base64:
+                    context += ai.safe_math(query)
+                context += get_authoritative_context(query)
+                context += ai.retrieve_context(query)
+
+            system_content = (
+                "你是专业的学习助手。请根据提供的资料、上下文或图片准确回答用户问题。"
+                "如果用户上传了图片，请精确识别其中的文字、公式或逻辑结构并进行解答。"
+            )
+            if context:
+                system_content += f"\n\n背景上下文:\n{context}"
+            if history_text:
+                system_content += f"\n\n历史对话记录:\n{history_text}"
+
+            image_data_url = ai.to_data_url(image_base64) if image_base64 else None
+            final_query = query or "请详细提取和描述这张图片中的所有关键信息、数字与文字。"
+
+            # 2. DeepSeek API 流式输出，保持前端 `data: {"token": ...}` 契约不变
+            for token in ai.stream_answer(system_content, final_query, image_data_url=image_data_url):
                 full_answer += token
                 yield f"data: {json.dumps({'token': token})}\n\n"
-        
-        # 5. 异步落库
-        with app.app_context():
-            db_content = f"[图像] {query[:50]}" if image_base64 else query
-            db.session.add(Question(
-                content=db_content, 
-                answer=full_answer.strip(), 
-                student_id=current_user.id
-            ))
-            db.session.commit()
+
+            # 3. 流结束后落库
+            with app.app_context():
+                db_content = f"[图像] {query[:50]}" if image_base64 else query
+                db.session.add(Question(
+                    content=db_content,
+                    answer=full_answer.strip(),
+                    student_id=current_user.id,
+                ))
+                db.session.commit()
+
+            yield f"data: {json.dumps({'done': True})}\n\n"
+
+        except Exception as exc:
+            logger.exception("AI 回答失败")
+            yield f"data: {json.dumps({'error': ai.friendly_error(exc)})}\n\n"
 
     return Response(stream_with_context(generate()), mimetype='text/event-stream')
 
@@ -378,7 +323,7 @@ def upload_only_image():
     img_data = file.read()
     img_b64 = base64.b64encode(img_data).decode()
     
-    # 将解码后图片交由 Qwen-VL 单独处理
+    # 将解码后图片交由 DeepSeek 视觉能力单独处理
     analysis = ai.analyze_image_standalone(img_b64)
     return flask.jsonify({"success": True, "analysis": analysis}), 200
 
@@ -398,14 +343,11 @@ def messages():
         
         send_email = True
         recent_msgs = Message.query.filter(Message.timestamp >= datetime.utcnow() - timedelta(hours=24), Message.id != msg.id).all()
-        if recent_msgs:
-            new_vec = ai.embeddings.embed_query(content)
-            for m in recent_msgs:
-                m_vec = ai.embeddings.embed_query(m.content)
-                if util.cos_sim(new_vec, m_vec).item() > 0.85:
-                    send_email = False
-                    break
-                    
+        for m in recent_msgs:
+            if ai.text_similarity(content, m.content) > 0.8:
+                send_email = False
+                break
+
         if send_email and app.config['MAIL_SERVER'] != 'smtp.example.com':
             try:
                 teachers = User.query.filter_by(role='teacher').all()
@@ -600,7 +542,7 @@ if __name__ == "__main__":
         db.create_all()
     
     print("\n✅ 系统启动成功！")
-    print("⚠️ 警告: Web 框架与 ML 模型耦合运行仅适合开发与演示。")
-    print("⚠️ 生产环境建议：将 AIEngine 剥离为 FastAPI 独立服务，或使用 vLLM 部署模型 API。\n")
-    
+    print(f"🤖 AI 服务: DeepSeek API（{os.getenv('DEEPSEEK_MODEL', 'deepseek-flash')}），不加载本地模型。")
+    print("⚠️ 仅适合演示：API Key 请放在本地 .env 或环境变量中，切勿提交到仓库。\n")
+
     app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
