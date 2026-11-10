@@ -75,7 +75,7 @@ class AIEngine:
             logger.exception("BM25 索引加载异常: %s", path)
             return None
 
-    def _extra_body(self) -> dict:
+    def extra_body(self) -> dict:
         """DeepSeek 的思考模式开关不是 OpenAI SDK 标准字段，需要走 extra_body。"""
         if self.thinking in {"enabled", "disabled"}:
             return {"extra_body": {"thinking": {"type": self.thinking}}}
@@ -109,7 +109,7 @@ class AIEngine:
             stream=True,
             temperature=0.7,
             max_tokens=max_tokens or self.default_max_tokens,
-            **self._extra_body(),
+            **self.extra_body(),
         )
 
         try:
@@ -133,7 +133,7 @@ class AIEngine:
             messages=self._messages(system_prompt, user_prompt),
             temperature=0.7,
             max_tokens=max_tokens,
-            **self._extra_body(),
+            **self.extra_body(),
         )
         if not response.choices:
             return ""
@@ -157,7 +157,7 @@ class AIEngine:
                 ],
                 temperature=0.3,
                 max_tokens=768,
-                **self._extra_body(),
+                **self.extra_body(),
             )
             if not response.choices:
                 return "未能解析图片内容。"
