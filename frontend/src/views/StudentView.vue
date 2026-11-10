@@ -25,6 +25,16 @@
         <a-col :xs="24" :xl="16">
           <a-card class="surface-card panel-card composer-card" title="智能提问">
             <a-form layout="vertical">
+              <div class="mode-switch">
+                <a-radio-group v-model:value="currentMode" size="small">
+                  <a-radio-button value="fast">快答</a-radio-button>
+                  <a-radio-button value="deep">深度</a-radio-button>
+                </a-radio-group>
+                <span class="mode-hint">
+                  {{ currentMode === 'deep' ? 'Agent 检索 + 卡片化回答' : '直接生成文字回答' }}
+                </span>
+              </div>
+
               <a-form-item label="输入问题">
                 <a-textarea
                   v-model:value="question"
@@ -95,15 +105,28 @@
               <div v-if="streamingAnswer" class="answer-stream markdown-body" v-html="renderedStreamingAnswer"></div>
               <div v-else class="answer-body markdown-body" v-html="renderedAnswer"></div>
 
-              <div v-if="sources && sources.length > 0" class="sources-block">
+              <tool-trace
+                v-if="agentTrace.length || (loading && agentStatus)"
+                :trace="agentTrace"
+                :duration-ms="agentDuration"
+                :status="loading ? agentStatus : ''"
+              />
+
+              <answer-cards
+                v-if="agentUi"
+                :ui="agentUi"
+                :sources="agentSources"
+                :chapters="chapterTitles"
+                @follow-up="askFollowUp"
+              />
+
+              <div v-if="agentSources.length > 0" class="sources-block">
                 <a-divider orientation="left">参考来源</a-divider>
-                <a-list item-layout="horizontal" :data-source="sources">
-                  <template #renderItem="{ item }">
-                    <a-list-item>
-                      <span class="source-item">{{ item }}</span>
-                    </a-list-item>
-                  </template>
-                </a-list>
+                <citation-chips
+                  :citations="agentSources.map((source) => source.citation)"
+                  :sources="agentSources"
+                  @follow-up="askFollowUp"
+                />
               </div>
             </a-card>
           </transition>
@@ -130,6 +153,19 @@
                   </a-popconfirm>
                 </div>
                 <div class="history-answer markdown-body" v-html="renderHistoryAnswer(item.answer)"></div>
+                <answer-cards
+                  v-if="item.ui"
+                  :ui="item.ui"
+                  :sources="item.trace ? item.trace.sources || [] : []"
+                  :chapters="chapterTitles"
+                  @follow-up="askFollowUp"
+                />
+                <tool-trace
+                  v-if="item.trace && item.trace.trace && item.trace.trace.length"
+                  :trace="item.trace.trace"
+                  :duration-ms="item.trace.durationMs || 0"
+                  compact
+                />
               </article>
             </TransitionGroup>
           </a-card>
@@ -220,13 +256,21 @@ import katex from 'katex'
 import 'katex/dist/katex.min.css'
 import { message as toast } from 'ant-design-vue'
 import { CopyOutlined, DeleteOutlined, UploadOutlined } from '@ant-design/icons-vue'
+import AnswerCards from '../components/cards/AnswerCards.vue'
+import ToolTrace from '../components/ToolTrace.vue'
+import CitationChips from '../components/cards/CitationChips.vue'
+import { readEventStream, TOOL_LABELS } from '../utils/sse'
+import { validateUI } from '../utils/uiCards'
 
 export default {
   name: 'StudentView',
   components: {
     CopyOutlined,
     DeleteOutlined,
-    UploadOutlined
+    UploadOutlined,
+    AnswerCards,
+    ToolTrace,
+    CitationChips
   },
   setup() {
     const question = ref('')
@@ -241,6 +285,18 @@ export default {
     const messageSuccess = ref(false)
     const uploadedImage = ref('')
     const copyMode = ref('markdown')
+
+    const agentUi = ref(null)
+    const agentSources = ref([])
+    const agentTrace = ref([])
+    const agentDuration = ref(0)
+    const agentStatus = ref('')
+    const currentMode = ref('deep')
+    const agentMeta = ref({ uiVersion: 1, modes: ['fast', 'deep'], chapters: [] })
+
+    const chapterTitles = computed(() =>
+      Object.fromEntries((agentMeta.value.chapters || []).map((chapter) => [chapter.id, chapter.title]))
+    )
 
     marked.setOptions({
       breaks: true,
@@ -356,63 +412,59 @@ export default {
       uploadedImage.value = ''
     }
 
-    const readStreamingResponse = async (response) => {
-      if (!response.ok || !response.body) {
-        let detail = ''
-        try {
-          const payload = await response.json()
-          detail = payload.error || payload.message || ''
-        } catch {
-          // 非 JSON 错误体（如网关错误页），忽略
-        }
-        throw new Error(detail || `HTTP error! status: ${response.status}`)
-      }
+    const resetAgentState = () => {
+      agentUi.value = null
+      agentSources.value = []
+      agentTrace.value = []
+      agentDuration.value = 0
+      agentStatus.value = ''
+    }
 
-      const reader = response.body.getReader()
-      const decoder = new TextDecoder()
-      let buffer = ''
+    const consumeStream = async (response) => {
       let serverError = ''
-
-      const handleLine = (line) => {
-        if (!line.startsWith('data: ')) return
-        try {
-          const data = JSON.parse(line.slice(6))
-          if (data.error) {
-            serverError = data.error
-            return
-          }
-          if (data.token) {
-            const token = sanitizeAnswer(data.token)
-            if (token) {
-              streamingAnswer.value += token
+      await readEventStream(response, (event) => {
+        switch (event.type) {
+          case 'start':
+            agentStatus.value = event.mode === 'deep' ? '正在检索和思考…' : '正在生成回答…'
+            break
+          case 'status':
+            agentStatus.value = event.message || ''
+            break
+          case 'tool_call':
+            agentStatus.value = TOOL_LABELS[event.name] || '正在调用工具…'
+            break
+          case 'tool_result':
+            agentStatus.value = event.summary || agentStatus.value
+            break
+          case 'answer_delta':
+            streamingAnswer.value += sanitizeAnswer(event.text || '')
+            break
+          case 'answer_reset':
+            streamingAnswer.value = ''
+            break
+          case 'ui':
+            agentUi.value = event.ui || null
+            break
+          case 'complete': {
+            answer.value = event.answer || streamingAnswer.value
+            agentSources.value = event.sources || []
+            agentTrace.value = event.trace || []
+            agentDuration.value = event.durationMs || 0
+            if (agentUi.value) {
+              const chapterSet = new Set(Object.keys(chapterTitles.value))
+              agentUi.value = validateUI(agentUi.value, agentSources.value, chapterSet).ui
             }
+            break
           }
-        } catch (error) {
-          console.warn('解析流式数据失败:', error)
+          case 'error':
+            serverError = event.message || 'AI 服务暂时不可用'
+            break
+          default:
+            break
         }
-      }
-
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-
-        // 保留跨 chunk 的半行，避免 TCP 分片导致 JSON 解析失败、丢 token
-        buffer += decoder.decode(value, { stream: true })
-        const lines = buffer.split('\n')
-        buffer = lines.pop() ?? ''
-        for (const line of lines) {
-          handleLine(line)
-        }
-      }
-
-      buffer += decoder.decode()
-      if (buffer) {
-        handleLine(buffer)
-      }
-
-      if (serverError) {
-        throw new Error(serverError)
-      }
+      })
+      if (serverError) throw new Error(serverError)
+      if (!answer.value) answer.value = streamingAnswer.value
     }
 
     const analyzeImageOnly = async () => {
@@ -421,16 +473,21 @@ export default {
       loading.value = true
       answer.value = ''
       streamingAnswer.value = ''
+      resetAgentState()
 
       try {
         const response = await fetch('/api/multimodal/qa', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ image: uploadedImage.value.split(',')[1] }),
+          body: JSON.stringify({
+            image: uploadedImage.value.split(',')[1],
+            mode: 'fast',
+            uiVersion: 1
+          }),
           credentials: 'include'
         })
 
-        await readStreamingResponse(response)
+        await consumeStream(response)
         answer.value = streamingAnswer.value
         await fetchQuestionHistory()
       } catch (error) {
@@ -450,6 +507,7 @@ export default {
       loading.value = true
       answer.value = ''
       streamingAnswer.value = ''
+      resetAgentState()
 
       try {
         const withImage = Boolean(uploadedImage.value)
@@ -458,13 +516,18 @@ export default {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(
             withImage
-              ? { question: question.value, image: uploadedImage.value.split(',')[1] }
-              : { question: question.value }
+              ? {
+                  question: question.value,
+                  image: uploadedImage.value.split(',')[1],
+                  mode: 'fast',
+                  uiVersion: 1
+                }
+              : { question: question.value, mode: currentMode.value, uiVersion: 1 }
           ),
           credentials: 'include'
         })
 
-        await readStreamingResponse(response)
+        await consumeStream(response)
         answer.value = streamingAnswer.value
         await fetchQuestionHistory()
         question.value = ''
@@ -509,12 +572,21 @@ export default {
     const fetchQuestionHistory = async () => {
       try {
         const response = await axios.get('/api/student/questions/history')
-        history.value = response.data.map((item) => ({
-          id: item.id,
-          question: item.question,
-          answer: item.answer,
-          timestamp: item.timestamp
-        }))
+        const chapterSet = new Set(Object.keys(chapterTitles.value))
+        history.value = response.data.map((item) => {
+          const trace = item.trace || null
+          const sources = (trace && trace.sources) || []
+          const validated = item.ui ? validateUI(item.ui, sources, chapterSet).ui : null
+          return {
+            id: item.id,
+            question: item.question,
+            answer: item.answer,
+            timestamp: item.timestamp,
+            mode: item.mode || 'fast',
+            ui: validated,
+            trace
+          }
+        })
       } catch (error) {
         console.error('加载提问历史失败:', error)
       }
@@ -555,8 +627,24 @@ export default {
       }
     }
 
-    onMounted(() => {
-      fetchQuestionHistory()
+    const fetchAgentMeta = async () => {
+      try {
+        const response = await axios.get('/api/agent/meta')
+        agentMeta.value = response.data || agentMeta.value
+      } catch (error) {
+        console.error('加载 Agent 配置失败:', error)
+      }
+    }
+
+    const askFollowUp = async (prompt) => {
+      if (!prompt) return
+      question.value = prompt
+      await submitQuestion()
+    }
+
+    onMounted(async () => {
+      await fetchAgentMeta()
+      await fetchQuestionHistory()
       fetchMessages()
     })
 
@@ -587,7 +675,16 @@ export default {
       copyableAnswer,
       renderedAnswer,
       renderedStreamingAnswer,
-      renderHistoryAnswer
+      renderHistoryAnswer,
+      agentUi,
+      agentSources,
+      agentTrace,
+      agentDuration,
+      agentStatus,
+      currentMode,
+      agentMeta,
+      chapterTitles,
+      askFollowUp
     }
   }
 }
@@ -1051,5 +1148,17 @@ export default {
     flex-direction: column;
     align-items: flex-start;
   }
+}
+.mode-switch {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+}
+
+.mode-hint {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.45);
 }
 </style>
