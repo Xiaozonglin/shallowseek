@@ -9,10 +9,15 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
 
-DEFAULT_TEMPLATE = "learn_new"
+DEFAULT_TEMPLATE = "free"
 DEFAULT_STYLE = "long_form"
 
 TEMPLATES: Dict[str, Dict[str, str]] = {
+    "free": {
+        "label": "自由回答",
+        "description": "不套用固定框架，按问题类型直接作答（事实查询直接回答）",
+        "instructions": "",
+    },
     "learn_new": {
         "label": "学习新知",
         "description": "先辨析概念边界，再用最小例子和变式题检验理解",
@@ -87,14 +92,41 @@ def is_valid_style(value: Optional[str]) -> bool:
     return (value or "").strip() in STYLES
 
 
+FREE_TEMPLATE_GUIDE = (
+    "回答模板：自由回答（不强制套用固定框架）。\n"
+    "- 先判断问题类型：事实、规则、流程、数据查询类问题直接给出准确结论与依据，"
+    "不要硬加例子、变式题、自测提示或教学步骤；不知道就明确说不知道，并说明缺少哪项资料。\n"
+    "- 只有概念学习/解题类问题，才需要使用概念辨析、例子或练习。"
+)
+
+
+def template_instructions(template: Optional[str]) -> str:
+    template_id = normalize_template(template)
+    if template_id == "free":
+        return FREE_TEMPLATE_GUIDE
+    return TEMPLATES[template_id]["instructions"]
+
+
+def style_instructions(style: Optional[str]) -> str:
+    return STYLES[normalize_style(style)]["instructions"]
+
+
 def mode_instructions(template: Optional[str], style: Optional[str]) -> str:
-    """拼出注入 system prompt 的「本轮回答效果」说明。"""
-    template_spec = TEMPLATES[normalize_template(template)]
-    style_spec = STYLES[normalize_style(style)]
+    """深度模式：模板可选（默认自由回答）+ 交流方式。"""
     return (
         "【本轮回答效果】\n"
-        f"{template_spec['instructions']}\n\n"
-        f"{style_spec['instructions']}"
+        f"{template_instructions(template)}\n\n"
+        f"{style_instructions(style)}"
+    )
+
+
+def fast_mode_instructions(style: Optional[str] = None) -> str:
+    """快答模式：不套用任何模板，只保留交流方式（默认直接回答）。"""
+    return (
+        "【本轮回答效果】\n"
+        "快速回答：不套用回答模板，直接、准确地回答用户问题；"
+        "事实/规则类问题不要附加例子、变式题或教学步骤。\n\n"
+        f"{style_instructions(style)}"
     )
 
 

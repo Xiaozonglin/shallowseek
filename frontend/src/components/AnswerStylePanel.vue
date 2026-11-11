@@ -2,7 +2,9 @@
   <div class="answer-style">
     <button type="button" class="style-trigger" @click="open = !open">
       <span class="style-trigger-label">回答效果</span>
-      <span class="style-trigger-value">{{ activeTemplate.label }} · {{ activeStyle.label }}</span>
+      <span class="style-trigger-value">
+        {{ mode === 'fast' ? '直接回答' : activeTemplate.label }} · {{ activeStyle.label }}
+      </span>
       <down-outlined class="style-trigger-arrow" :class="{ open }" />
     </button>
 
@@ -11,7 +13,8 @@
         <section class="style-section">
           <header class="style-section-head">
             <span>回答模板</span>
-            <small>决定回答的框架</small>
+            <small v-if="mode === 'fast'" class="style-fast-hint">快答模式直接回答，不套用模板</small>
+            <small v-else>可选，默认自由回答</small>
           </header>
           <div class="style-options">
             <button
@@ -19,7 +22,8 @@
               :key="item.id"
               type="button"
               class="style-option"
-              :class="{ active: item.id === template }"
+              :class="{ active: item.id === template, disabled: mode === 'fast' }"
+              :disabled="mode === 'fast'"
               @click="$emit('update:template', item.id)"
             >
               <span class="option-label">{{ item.label }}</span>
@@ -62,8 +66,9 @@ import { computed, ref } from 'vue'
 import { DownOutlined } from '@ant-design/icons-vue'
 
 const props = defineProps({
-  template: { type: String, default: 'learn_new' },
+  template: { type: String, default: 'free' },
   style: { type: String, default: 'long_form' },
+  mode: { type: String, default: 'deep' },
   templates: { type: Array, default: () => [] },
   styles: { type: Array, default: () => [] }
 })
@@ -72,7 +77,7 @@ defineEmits(['update:template', 'update:style'])
 const open = ref(false)
 
 const activeTemplate = computed(
-  () => props.templates.find((item) => item.id === props.template) || props.templates[0] || { label: '学习新知' }
+  () => props.templates.find((item) => item.id === props.template) || props.templates[0] || { label: '自由回答' }
 )
 const activeStyle = computed(
   () => props.styles.find((item) => item.id === props.style) || props.styles[0] || { label: '长对话' }
@@ -219,5 +224,13 @@ const activeStyle = computed(
   .style-options-row {
     grid-template-columns: 1fr;
   }
+}
+.style-option.disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.style-fast-hint {
+  color: rgba(255, 200, 120, 0.75) !important;
 }
 </style>

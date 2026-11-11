@@ -545,7 +545,7 @@ def _build_fast_prompt(student_id, query, image_base64, file_name="", file_conte
         "如果用户上传了图片，请精确识别其中的文字、公式或逻辑结构并进行解答。"
         "如果用户上传了文件，请先阅读文件内容，再结合用户问题作答。"
     )
-    system_content += "\n\n" + answer_modes.mode_instructions(template, style)
+    system_content += "\n\n" + answer_modes.fast_mode_instructions(style)
     if context:
         system_content += f"\n\n背景上下文:\n{context}"
     if file_context:
@@ -575,7 +575,7 @@ def _legacy_fast_stream(student_id, query, image_base64, file_name="", file_cont
             yield f"data: {json.dumps({'token': token})}\n\n"
 
         db_content = _question_record_content(query, image_base64, file_name, file_context)
-        _save_question(student_id, db_content, full_answer, mode="fast", template=template, style=style, conversation_id=conversation_id)
+        _save_question(student_id, db_content, full_answer, mode="fast", template=answer_modes.DEFAULT_TEMPLATE, style=style, conversation_id=conversation_id)
         yield f"data: {json.dumps({'done': True})}\n\n"
     except Exception as exc:
         logger.exception("AI 回答失败")
@@ -583,9 +583,9 @@ def _legacy_fast_stream(student_id, query, image_base64, file_name="", file_cont
 
 
 def _typed_fast_stream(student_id, query, image_base64, file_name="", file_context="", template=None, style=None, conversation_id=None):
-    """新客户端 + 快答：统一事件协议，无工具、无卡片。"""
+    """新客户端 + 快答：统一事件协议，无模板、无工具、无卡片。"""
     answer = ""
-    template_id = answer_modes.normalize_template(template)
+    template_id = answer_modes.DEFAULT_TEMPLATE
     style_id = answer_modes.normalize_style(style)
     started = _time.monotonic()
     try:
