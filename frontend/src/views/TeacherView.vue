@@ -101,6 +101,66 @@
             </a-collapse>
           </a-card>
 
+          <a-card class="surface-card teacher-card" title="共性问题合并">
+            <template #extra>
+              <a-button size="small" @click="fetchGroupData">刷新建议</a-button>
+            </template>
+            <p class="merge-hint">
+              把相似的学生提问合并成一条，一次回复组内所有学生；系统会按相似度给出建议。
+            </p>
+
+            <div v-if="groupSuggestions.length" class="merge-suggestions">
+              <div v-for="(suggestion, index) in groupSuggestions" :key="index" class="merge-suggestion">
+                <div class="merge-suggestion-head">
+                  <span>
+                    {{ suggestion.questions.length }} 条相似问题 · 相似度
+                    {{ Math.round((suggestion.score || 0) * 100) }}%
+                  </span>
+                  <a-button type="primary" size="small" @click="openSuggestionMerge(suggestion)">合并并回复</a-button>
+                </div>
+                <ul class="merge-suggestion-questions">
+                  <li v-for="question in suggestion.questions" :key="question.id">
+                    <strong>{{ question.student_name }}</strong>：{{ question.content }}
+                  </li>
+                </ul>
+              </div>
+            </div>
+            <a-empty v-else description="暂未发现相似问题建议" />
+
+            <a-divider orientation="left">手动选择</a-divider>
+            <a-checkbox-group v-model:value="mergeQuestionIds" class="manual-merge-list">
+              <a-checkbox v-for="item in pendingQuestions" :key="item.id" :value="item.id">
+                {{ item.student_name }} · {{ item.content.substring(0, 30) }}
+              </a-checkbox>
+            </a-checkbox-group>
+            <a-button class="manual-merge-button" :disabled="mergeQuestionIds.length < 2" @click="openManualMerge">
+              合并选中的 {{ mergeQuestionIds.length }} 条
+            </a-button>
+
+            <a-divider orientation="left">已合并的共性问题</a-divider>
+            <a-empty v-if="groups.length === 0" description="还没有合并的共性问题" />
+            <div v-else class="merged-groups">
+              <article v-for="group in groups" :key="group.id" class="merged-group">
+                <div class="merged-group-head">
+                  <strong>{{ group.title }}</strong>
+                  <span class="merged-group-count">{{ group.member_count }} 条问题</span>
+                </div>
+                <p class="merged-group-answer">{{ group.answer || '尚未填写合并回复' }}</p>
+                <div class="merged-group-actions">
+                  <a-button size="small" @click="openGroupEdit(group)">编辑合并回复</a-button>
+                  <a-popconfirm
+                    title="解除合并后，这些问题会回到待处理列表"
+                    ok-text="解除"
+                    cancel-text="取消"
+                    @confirm="removeGroup(group)"
+                  >
+                    <a-button size="small" danger type="text">解除合并</a-button>
+                  </a-popconfirm>
+                </div>
+              </article>
+            </div>
+          </a-card>
+
           <a-card class="surface-card teacher-card" title="学生学习分析">
             <a-empty
               v-if="!stats.questions_by_student || Object.keys(stats.questions_by_student).length === 0"
@@ -173,6 +233,31 @@
           </a-card>
         </a-col>
       </a-row>
+
+      <a-modal
+        v-model:open="mergeModalVisible"
+        :title="mergeEditingId ? '编辑合并回复' : '合并共性问题'"
+        ok-text="保存"
+        cancel-text="取消"
+        :confirm-loading="mergeSaving"
+        @ok="submitMerge"
+      >
+        <a-form layout="vertical">
+          <a-form-item label="共性问题标题">
+            <a-input v-model:value="mergeForm.title" :maxlength="60" placeholder="例如：二分查找的时间复杂度" />
+          </a-form-item>
+          <a-form-item label="合并回复（组内学生都会看到）">
+            <a-textarea
+              v-model:value="mergeForm.answer"
+              :rows="6"
+              placeholder="写一次回复，选中这些问题的学生都会看到。"
+            />
+          </a-form-item>
+          <p class="merge-modal-hint">
+            将合并 {{ mergeForm.questionIds.length }} 条问题；保存后学生历史会显示老师回复，后续相似问题也会参考它。
+          </p>
+        </a-form>
+      </a-modal>
     </div>
   </div>
 </template>
@@ -199,6 +284,15 @@ export default {
     const error = ref('')
     const activeQuestionKeys = ref([])
     const activeStudentKeys = ref([])
+
+    // 共性问题合并
+    const groups = ref([])
+    const groupSuggestions = ref([])
+    const mergeQuestionIds = ref([])
+    const mergeModalVisible = ref(false)
+    const mergeSaving = ref(false)
+    const mergeEditingId = ref(null)
+    const mergeForm = ref({ title: '', answer: '', questionIds: [] })
 
     marked.setOptions({
       breaks: true,
@@ -320,10 +414,107 @@ export default {
       }
     }
 
+    const fetchGroups = async () => {
+      try {
+        const response = await axios.get('/api/questions/groups')
+        groups.value = response.data || []
+      } catch (err) {
+        console.error('加载合并组失败:', err)
+      }
+    }
+
+    const fetchGroupSuggestions = async () => {
+      try {
+        const response = await axios.get('/api/questions/groups/suggestions')
+        groupSuggestions.value = response.data || []
+      } catch (err) {
+        console.error('加载合并建议失败:', err)
+      }
+    }
+
+    const fetchGroupData = async () => {
+      await Promise.all([fetchGroups(), fetchGroupSuggestions()])
+    }
+
+    const openSuggestionMerge = (suggestion) => {
+      mergeEditingId.value = null
+      mergeForm.value = {
+        title: (suggestion.suggestedTitle || '').slice(0, 60),
+        answer: '',
+        questionIds: suggestion.questions.map((item) => item.id)
+      }
+      mergeModalVisible.value = true
+    }
+
+    const openManualMerge = () => {
+      mergeEditingId.value = null
+      mergeForm.value = { title: '', answer: '', questionIds: [...mergeQuestionIds.value] }
+      mergeModalVisible.value = true
+    }
+
+    const openGroupEdit = (group) => {
+      mergeEditingId.value = group.id
+      mergeForm.value = {
+        title: group.title || '',
+        answer: group.answer || '',
+        questionIds: group.question_ids || []
+      }
+      mergeModalVisible.value = true
+    }
+
+    const submitMerge = async () => {
+      if (mergeSaving.value) return
+      if (!mergeEditingId.value && mergeForm.value.questionIds.length < 2) {
+        toast.warning('至少选择 2 条相似问题')
+        return
+      }
+      if (!mergeForm.value.answer || !mergeForm.value.answer.trim()) {
+        toast.warning('请填写合并回复')
+        return
+      }
+      mergeSaving.value = true
+      try {
+        if (mergeEditingId.value) {
+          await axios.put(`/api/questions/groups/${mergeEditingId.value}`, {
+            title: mergeForm.value.title,
+            answer: mergeForm.value.answer
+          })
+          toast.success('合并回复已更新')
+        } else {
+          await axios.post('/api/questions/groups', {
+            title: mergeForm.value.title,
+            answer: mergeForm.value.answer,
+            question_ids: mergeForm.value.questionIds
+          })
+          toast.success('已合并并回复，组内学生都能看到')
+        }
+        mergeModalVisible.value = false
+        mergeQuestionIds.value = []
+        await Promise.all([fetchPendingQuestions(), fetchGroups(), fetchGroupSuggestions(), fetchStats()])
+      } catch (err) {
+        console.error('合并共性问题失败:', err)
+        toast.error(err.response?.data?.error || '合并失败，请稍后重试')
+      } finally {
+        mergeSaving.value = false
+      }
+    }
+
+    const removeGroup = async (group) => {
+      try {
+        await axios.delete(`/api/questions/groups/${group.id}`)
+        toast.success('已解除合并')
+        await Promise.all([fetchGroups(), fetchPendingQuestions(), fetchGroupSuggestions()])
+      } catch (err) {
+        console.error('解除合并失败:', err)
+        toast.error(err.response?.data?.error || '解除失败，请稍后重试')
+      }
+    }
+
     onMounted(() => {
       fetchStats()
       fetchPendingQuestions()
       fetchMessages()
+      fetchGroupData()
     })
 
     return {
@@ -339,7 +530,20 @@ export default {
       fetchPendingQuestions,
       submitAuthAnswer,
       deletePendingQuestion,
-      replyToMessage
+      replyToMessage,
+      groups,
+      groupSuggestions,
+      mergeQuestionIds,
+      mergeModalVisible,
+      mergeSaving,
+      mergeEditingId,
+      mergeForm,
+      fetchGroupData,
+      openSuggestionMerge,
+      openManualMerge,
+      openGroupEdit,
+      submitMerge,
+      removeGroup
     }
   }
 }
@@ -736,5 +940,98 @@ export default {
   font-size: 12px;
   line-height: 1.7;
   color: rgba(255, 255, 255, 0.55);
+}
+.merge-hint {
+  margin: 0 0 14px;
+  font-size: 12px;
+  line-height: 1.7;
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.merge-suggestions {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.merge-suggestion {
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.merge-suggestion-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.6);
+}
+
+.merge-suggestion-questions {
+  margin: 10px 0 0;
+  padding-left: 18px;
+  font-size: 12px;
+  line-height: 1.8;
+  color: rgba(255, 255, 255, 0.62);
+}
+
+.manual-merge-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.manual-merge-button {
+  margin-top: 12px;
+}
+
+.merged-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.merged-group {
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(120, 190, 255, 0.2);
+  background: rgba(120, 190, 255, 0.05);
+}
+
+.merged-group-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.merged-group-count {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.4);
+}
+
+.merged-group-answer {
+  margin: 8px 0 10px;
+  font-size: 13px;
+  line-height: 1.8;
+  color: rgba(255, 255, 255, 0.78);
+  white-space: pre-wrap;
+}
+
+.merged-group-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.merge-modal-hint {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.7;
+  color: rgba(255, 255, 255, 0.42);
 }
 </style>
