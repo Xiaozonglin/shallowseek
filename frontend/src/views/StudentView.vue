@@ -1,14 +1,14 @@
 <template>
   <div class="workspace-page">
     <student-sidebar
-      :history="history"
-      :active-id="selectedHistoryId"
+      :history="conversationList"
+      :active-id="activeConversationId"
       :panel="activePanel"
       :open="sidebarOpen"
-      @new-question="startNewQuestion"
-      @select="selectHistory"
-      @rename="renameHistoryTitle"
-      @delete="deleteHistoryRecord"
+      @new-question="startNewConversation"
+      @select="selectConversation"
+      @rename="renameConversation"
+      @delete="deleteConversationRecord"
       @open-plugins="openPlugins"
       @open-workspace="openWorkspace"
       @open-campus="openCampus"
@@ -63,7 +63,7 @@
           </div>
         </section>
 
-        <section v-if="activePanel === 'workspace'" class="workspace-hero">
+        <section v-if="activePanel === 'workspace' && !hasConversation" class="workspace-hero">
         <div>
           <div class="workspace-eyebrow">Student Workspace</div>
           <h1>What should we work on?</h1>
@@ -73,8 +73,8 @@
         </div>
         <div class="workspace-stats">
           <div class="metric-card">
-            <span>历史提问</span>
-            <strong>{{ history.length }}</strong>
+            <span>历史会话</span>
+            <strong>{{ conversations.length }}</strong>
           </div>
           <div class="metric-card">
             <span>留言记录</span>
@@ -85,6 +85,111 @@
 
       <a-row v-if="activePanel === 'workspace'" :gutter="[24, 24]">
         <a-col :xs="24" :xl="16">
+          <div v-if="hasConversation" class="conversation-toolbar">
+            <div class="conversation-heading">
+              <strong>{{ activeConversationTitle }}</strong>
+              <span>{{ turns.length }} 轮对话</span>
+            </div>
+            <a-button size="small" @click="startNewConversation">
+              <template #icon><plus-outlined /></template>
+              新会话
+            </a-button>
+          </div>
+
+          <section v-if="hasConversation" class="chat-thread">
+            <article v-for="turn in turns" :key="turn.id" class="chat-turn">
+              <div class="chat-question-bubble">
+                <span class="chat-role">你</span>
+                <p>{{ turn.question }}</p>
+              </div>
+              <div class="chat-answer-card">
+                <div class="chat-answer-meta">
+                  <span class="chat-role">XDWe</span>
+                  <a-tag :color="turn.mode === 'deep' ? 'blue' : 'default'">
+                    {{ turn.mode === 'deep' ? '深度' : '快答' }}
+                  </a-tag>
+                  <a-tag color="purple">{{ templateLabel(turn.template) }}</a-tag>
+                  <a-tag>{{ styleLabel(turn.style) }}</a-tag>
+                  <a-tag v-if="turn.shared" color="green">已提交老师</a-tag>
+                  <span class="chat-answer-actions">
+                    <a-button
+                      v-if="!turn.shared"
+                      size="small"
+                      type="link"
+                      :loading="sharingBusy"
+                      @click="shareQuestionToTeacher(turn.id)"
+                    >
+                      提交给老师
+                    </a-button>
+                    <a-button
+                      v-else-if="!turn.authoritative_answer"
+                      size="small"
+                      type="link"
+                      :loading="sharingBusy"
+                      @click="withdrawQuestionFromTeacher(turn.id)"
+                    >
+                      撤回
+                    </a-button>
+                    <a-tag v-else color="green">老师已回复</a-tag>
+                  </span>
+                </div>
+                <div class="markdown-body chat-answer-body" v-html="renderHistoryAnswer(turn.answer)"></div>
+                <answer-cards
+                  v-if="turn.ui"
+                  :ui="turn.ui"
+                  :sources="turn.trace ? turn.trace.sources || [] : []"
+                  :chapters="chapterTitles"
+                  @follow-up="askFollowUp"
+                />
+                <tool-trace
+                  v-if="turn.trace && turn.trace.trace && turn.trace.trace.length"
+                  :trace="turn.trace.trace"
+                  :duration-ms="turn.trace.durationMs || 0"
+                  compact
+                />
+                <div v-if="turn.authoritative_answer" class="teacher-reply">
+                  <div class="teacher-reply-head">
+                    <span class="teacher-reply-label">老师回复</span>
+                    <a-tag v-if="turn.merged_group" color="blue">合并了同类问题</a-tag>
+                  </div>
+                  <div class="teacher-reply-body">{{ turn.authoritative_answer }}</div>
+                  <p v-if="turn.merged_group" class="teacher-reply-note">
+                    这条回复合并了同类问题：{{ turn.merged_group.title }}
+                  </p>
+                </div>
+              </div>
+            </article>
+
+            <article v-if="pendingQuestion" class="chat-turn chat-pending">
+              <div class="chat-question-bubble">
+                <span class="chat-role">你</span>
+                <p>{{ pendingQuestion }}</p>
+              </div>
+              <div class="chat-answer-card">
+                <div class="chat-answer-meta">
+                  <span class="chat-role">XDWe</span>
+                  <span v-if="loading" class="chat-pending-status">{{ agentStatus || '正在思考…' }}</span>
+                </div>
+                <div v-if="streamingAnswer" class="answer-stream markdown-body" v-html="renderedStreamingAnswer"></div>
+                <div v-else-if="answer" class="markdown-body chat-answer-body" v-html="renderedAnswer"></div>
+                <tool-trace
+                  v-if="agentTrace.length || (loading && agentStatus)"
+                  :trace="agentTrace"
+                  :duration-ms="agentDuration"
+                  :status="loading ? agentStatus : ''"
+                />
+                <answer-cards
+                  v-if="agentUi"
+                  :ui="agentUi"
+                  :sources="agentSources"
+                  :chapters="chapterTitles"
+                  @follow-up="askFollowUp"
+                />
+              </div>
+            </article>
+          </section>
+
+          <div class="composer-dock" :class="{ 'is-docked': hasConversation }">
           <a-card class="surface-card panel-card composer-card" title="智能提问">
             <a-form layout="vertical">
               <div class="mode-switch">
@@ -164,182 +269,7 @@
             </a-form>
           </a-card>
 
-          <transition name="soft-rise">
-            <a-card
-              v-if="!selectedHistory && (streamingAnswer || answer)"
-              class="surface-card panel-card answer-panel"
-              title="回答结果"
-            >
-              <template #extra>
-                <div class="answer-copy-toolbar">
-                  <a-radio-group v-model:value="copyMode" size="small" button-style="solid">
-                    <a-radio-button value="markdown">Markdown</a-radio-button>
-                    <a-radio-button value="plain">纯文本</a-radio-button>
-                  </a-radio-group>
-                  <a-button size="small" @click="copyAnswer" :disabled="!copyableAnswer">
-                    <template #icon><copy-outlined /></template>
-                    复制
-                  </a-button>
-                </div>
-              </template>
-              <div v-if="streamingAnswer" class="answer-stream markdown-body" v-html="renderedStreamingAnswer"></div>
-              <div v-else class="answer-body markdown-body" v-html="renderedAnswer"></div>
-
-              <tool-trace
-                v-if="agentTrace.length || (loading && agentStatus)"
-                :trace="agentTrace"
-                :duration-ms="agentDuration"
-                :status="loading ? agentStatus : ''"
-              />
-
-              <answer-cards
-                v-if="agentUi"
-                :ui="agentUi"
-                :sources="agentSources"
-                :chapters="chapterTitles"
-                @follow-up="askFollowUp"
-              />
-
-              <div v-if="agentSources.length > 0" class="sources-block">
-                <a-divider orientation="left">参考来源</a-divider>
-                <citation-chips
-                  :citations="agentSources.map((source) => source.citation)"
-                  :sources="agentSources"
-                  @follow-up="askFollowUp"
-                />
-              </div>
-
-              <div v-if="currentQuestionId" class="privacy-bar">
-                <div class="privacy-copy">
-                  <lock-outlined v-if="!currentQuestionShared" class="privacy-icon" />
-                  <safety-certificate-outlined v-else class="privacy-icon is-accepted" />
-                  <span v-if="!currentQuestionShared">
-                    这次问答默认<strong>仅自己可见</strong>，不会自动同步给老师。
-                  </span>
-                  <span v-else-if="currentQuestionAnswered">
-                    已提交给老师，老师已回复；这条问答会保留在课程记录中。
-                  </span>
-                  <span v-else>
-                    已提交给老师，老师可以查看并回复；老师回复前可撤回。
-                  </span>
-                </div>
-                <a-button
-                  v-if="!currentQuestionShared"
-                  type="primary"
-                  size="small"
-                  :loading="sharingBusy"
-                  @click="shareQuestionToTeacher(currentQuestionId)"
-                >
-                  提交给老师
-                </a-button>
-                <a-button
-                  v-else-if="!currentQuestionAnswered"
-                  size="small"
-                  :loading="sharingBusy"
-                  @click="withdrawQuestionFromTeacher(currentQuestionId)"
-                >
-                  撤回
-                </a-button>
-                <a-tag v-else color="green">老师已回复</a-tag>
-              </div>
-            </a-card>
-          </transition>
-
-          <transition name="soft-rise">
-            <a-card
-              v-if="selectedHistory"
-              class="surface-card panel-card history-detail-panel"
-              title="历史记录"
-            >
-              <template #extra>
-                <div class="history-detail-actions">
-                  <a-button size="small" @click="closeHistoryDetail">返回</a-button>
-                  <a-popconfirm
-                    title="确定删除这条提问记录吗？"
-                    ok-text="删除"
-                    cancel-text="取消"
-                    @confirm="deleteHistoryRecord(selectedHistory)"
-                  >
-                    <a-button type="text" danger size="small">
-                      <template #icon><delete-outlined /></template>
-                      删除
-                    </a-button>
-                  </a-popconfirm>
-                </div>
-              </template>
-
-              <div class="history-meta">
-                <span>{{ new Date(selectedHistory.timestamp).toLocaleString('zh-CN') }}</span>
-                <a-tag :color="selectedHistory.mode === 'deep' ? 'blue' : 'default'">
-                  {{ selectedHistory.mode === 'deep' ? '深度' : '快答' }}
-                </a-tag>
-                <a-tag color="purple">{{ templateLabel(selectedHistory.template) }}</a-tag>
-                <a-tag>{{ styleLabel(selectedHistory.style) }}</a-tag>
-              </div>
-
-              <div class="history-question">
-                <span class="history-kicker">Question</span>
-                <h3>{{ selectedHistory.question }}</h3>
-              </div>
-              <div class="history-answer markdown-body" v-html="renderHistoryAnswer(selectedHistory.answer)"></div>
-
-              <div v-if="selectedHistory.authoritative_answer" class="teacher-reply">
-                <div class="teacher-reply-head">
-                  <span class="teacher-reply-label">老师回复</span>
-                  <a-tag v-if="selectedHistory.merged_group" color="blue">合并了同类问题</a-tag>
-                </div>
-                <div class="teacher-reply-body">{{ selectedHistory.authoritative_answer }}</div>
-                <p v-if="selectedHistory.merged_group" class="teacher-reply-note">
-                  这条回复合并了同类问题：{{ selectedHistory.merged_group.title }}
-                </p>
-              </div>
-              <answer-cards
-                v-if="selectedHistory.ui"
-                :ui="selectedHistory.ui"
-                :sources="selectedHistory.trace ? selectedHistory.trace.sources || [] : []"
-                :chapters="chapterTitles"
-                @follow-up="askFollowUp"
-              />
-              <tool-trace
-                v-if="selectedHistory.trace && selectedHistory.trace.trace && selectedHistory.trace.trace.length"
-                :trace="selectedHistory.trace.trace"
-                :duration-ms="selectedHistory.trace.durationMs || 0"
-                compact
-              />
-
-              <div class="privacy-bar privacy-bar-detail">
-                <div class="privacy-copy">
-                  <lock-outlined v-if="!selectedHistory.shared" class="privacy-icon" />
-                  <safety-certificate-outlined v-else class="privacy-icon is-accepted" />
-                  <span v-if="!selectedHistory.shared">
-                    这条问答默认<strong>仅自己可见</strong>，不会自动同步给老师。
-                  </span>
-                  <span v-else-if="selectedHistory.authoritative_answer">
-                    已提交给老师，老师已回复；该问答会保留在课程记录中。
-                  </span>
-                  <span v-else>已提交给老师，老师可以查看并回复；老师回复前可撤回。</span>
-                </div>
-                <a-button
-                  v-if="!selectedHistory.shared"
-                  type="primary"
-                  size="small"
-                  :loading="sharingBusy"
-                  @click="shareQuestionToTeacher(selectedHistory.id)"
-                >
-                  提交给老师
-                </a-button>
-                <a-button
-                  v-else-if="!selectedHistory.authoritative_answer"
-                  size="small"
-                  :loading="sharingBusy"
-                  @click="withdrawQuestionFromTeacher(selectedHistory.id)"
-                >
-                  撤回
-                </a-button>
-                <a-tag v-else color="green">老师已回复</a-tag>
-              </div>
-            </a-card>
-          </transition>
+          </div>
         </a-col>
 
         <a-col :xs="24" :xl="8">
@@ -480,7 +410,10 @@ export default {
     const streamingAnswer = ref('')
     const loading = ref(false)
     const sources = ref([])
-    const history = ref([])
+    const conversations = ref([])
+    const turns = ref([])
+    const pendingQuestion = ref('')
+    const activeConversationId = ref(null)
     const messages = ref([])
     const messageToTeacher = ref('')
     const sendingMessage = ref(false)
@@ -491,8 +424,6 @@ export default {
     // 侧边栏 / 历史详情 / 学生插件
     const sidebarOpen = ref(false)
     const activePanel = ref('workspace')
-    const selectedHistoryId = ref(null)
-    const titleRequested = new Set()
 
     // 隐私边界：问答默认私密，只有学生主动提交后老师才能看到
     const currentQuestionId = ref(null)
@@ -524,10 +455,6 @@ export default {
         installed: false
       }
     ]
-
-    const selectedHistory = computed(
-      () => history.value.find((item) => item.id === selectedHistoryId.value) || null
-    )
 
     const agentUi = ref(null)
     const agentSources = ref([])
@@ -586,11 +513,21 @@ export default {
       Object.fromEntries((agentMeta.value.chapters || []).map((chapter) => [chapter.id, chapter.title]))
     )
 
-    const currentHistoryRecord = computed(
-      () => history.value.find((item) => item.id === currentQuestionId.value) || null
+    const hasConversation = computed(() => turns.value.length > 0 || Boolean(pendingQuestion.value))
+    const activeConversation = computed(
+      () => conversations.value.find((item) => item.id === activeConversationId.value) || null
     )
-    const currentQuestionShared = computed(() => Boolean(currentHistoryRecord.value?.shared))
-    const currentQuestionAnswered = computed(() => Boolean(currentHistoryRecord.value?.authoritative_answer))
+    const activeConversationTitle = computed(() => activeConversation.value?.title || '当前会话')
+    const conversationList = computed(() =>
+      conversations.value.map((item) => ({
+        id: item.id,
+        title: item.title || '新的会话',
+        question: item.last_question || '',
+        timestamp: item.updated_at || item.created_at,
+        shared: (item.shared_count || 0) > 0,
+        authoritative_answer: item.has_reply ? '已回复' : ''
+      }))
+    )
 
     // 把网络突发到达的 token 平滑打印出来，避免“等几秒后整段出现”
     const typewriter = createTypewriter((chunk) => {
@@ -794,6 +731,7 @@ export default {
       await readEventStream(response, (event) => {
         switch (event.type) {
           case 'start':
+            if (event.conversationId) activeConversationId.value = event.conversationId
             agentStatus.value = event.mode === 'deep' ? '正在检索和思考…' : '正在生成回答…'
             break
           case 'status':
@@ -820,6 +758,7 @@ export default {
             break
           case 'done':
             if (event.messageId) currentQuestionId.value = event.messageId
+            if (event.conversationId) activeConversationId.value = event.conversationId
             break
           case 'error':
             serverError = event.message || 'AI 服务暂时不可用'
@@ -855,10 +794,11 @@ export default {
       if (!file) return
 
       loading.value = true
-      selectedHistoryId.value = null
       answer.value = ''
       streamingAnswer.value = ''
       resetAgentState()
+      pendingQuestion.value =
+        question.value || (uploadedFile.value?.name ? `[文件] ${uploadedFile.value.name}` : '请分析这个文件')
 
       try {
         const isImage = file.kind === 'image'
@@ -888,10 +828,13 @@ export default {
 
         await consumeStream(response)
         answer.value = streamingAnswer.value
-        await fetchQuestionHistory()
+        finalizePendingTurn(pendingQuestion.value)
+        await fetchConversations()
       } catch (error) {
         // 保留已生成的部分回答，避免网络中断时内容凭空消失
         answer.value = streamingAnswer.value || ''
+        finalizePendingTurn(pendingQuestion.value)
+        pendingQuestion.value = ''
         console.error('文件分析失败:', error)
         alert(error.message || '文件分析失败，请稍后重试。')
       } finally {
@@ -904,10 +847,11 @@ export default {
       if (!question.value.trim() && !uploadedFile.value) return
 
       loading.value = true
-      selectedHistoryId.value = null
       answer.value = ''
       streamingAnswer.value = ''
       resetAgentState()
+      pendingQuestion.value =
+        question.value || (uploadedFile.value?.name ? `[文件] ${uploadedFile.value.name}` : '请分析这个文件')
 
       try {
         const file = uploadedFile.value
@@ -940,12 +884,15 @@ export default {
 
         await consumeStream(response)
         answer.value = streamingAnswer.value
-        await fetchQuestionHistory()
+        finalizePendingTurn(pendingQuestion.value)
+        await fetchConversations()
         question.value = ''
         removeFile()
       } catch (error) {
         // 保留已生成的部分回答，避免网络中断时内容凭空消失
         answer.value = streamingAnswer.value || ''
+        finalizePendingTurn(pendingQuestion.value)
+        pendingQuestion.value = ''
         console.error('提问失败:', error)
         alert(error.message || '提问失败，请检查网络或稍后重试。')
       } finally {
@@ -980,71 +927,38 @@ export default {
       }
     }
 
-    const fetchQuestionHistory = async () => {
+    const fetchConversations = async () => {
       try {
-        const response = await axios.get('/api/student/questions/history')
+        const response = await axios.get('/api/conversations')
+        conversations.value = response.data || []
+      } catch (error) {
+        console.error('加载会话列表失败:', error)
+      }
+    }
+
+    const refreshActiveConversation = async () => {
+      if (!activeConversationId.value) return
+      try {
+        const response = await axios.get(`/api/conversations/${activeConversationId.value}/messages`)
         const chapterSet = new Set(Object.keys(chapterTitles.value))
-        history.value = response.data.map((item) => {
+        turns.value = (response.data.turns || []).map((item) => {
           const trace = item.trace || null
           const sources = (trace && trace.sources) || []
           const validated = item.ui ? validateUI(item.ui, sources, chapterSet).ui : null
           return {
-            id: item.id,
-            question: item.question,
-            title: item.title || '',
-            answer: item.answer,
-            timestamp: item.timestamp,
-            mode: item.mode || 'fast',
+            ...item,
             template: item.template || 'learn_new',
             style: item.style || 'long_form',
             authoritative_answer: item.authoritative_answer || '',
             merged_group: item.merged_group || null,
             shared: Boolean(item.shared),
-            shared_at: item.shared_at || null,
             ui: validated,
             trace
           }
         })
-        // 历史标题由 LLM 懒生成：缺失标题的记录在后台补全，不阻塞页面渲染
-        backfillHistoryTitles()
       } catch (error) {
-        console.error('加载提问历史失败:', error)
+        console.error('加载会话消息失败:', error)
       }
-    }
-
-    // 旧记录 / 生成失败的记录：逐条请求后端用 LLM 补一个标题
-    const backfillHistoryTitles = async () => {
-      const pending = history.value
-        .filter((item) => item.id && !item.title && !titleRequested.has(item.id))
-        .slice(0, 12)
-
-      for (const item of pending) {
-        titleRequested.add(item.id)
-        try {
-          const response = await axios.post(`/api/questions/${item.id}/title`)
-          const title = response.data?.title
-          if (!title) continue
-          item.title = title
-          const current = history.value.find((record) => record.id === item.id)
-          if (current) current.title = title
-        } catch (error) {
-          console.error('生成历史标题失败:', error)
-        }
-      }
-    }
-
-    const selectHistory = (item) => {
-      if (!item || loading.value) return
-      activePanel.value = 'workspace'
-      selectedHistoryId.value = item.id
-      closeSidebar()
-      nextTick(() => {
-        document.querySelector('.history-detail-panel')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
-      })
-    }
-
-    const closeHistoryDetail = () => {
-      selectedHistoryId.value = null
     }
 
     const closeSidebar = () => {
@@ -1068,13 +982,15 @@ export default {
       window.scrollTo({ top: 0, behavior: 'smooth' })
     }
 
-    const startNewQuestion = () => {
+    const startNewConversation = () => {
       if (loading.value) {
         toast.info('正在生成回答，请稍候')
         return
       }
       activePanel.value = 'workspace'
-      selectedHistoryId.value = null
+      activeConversationId.value = null
+      turns.value = []
+      pendingQuestion.value = ''
       question.value = ''
       answer.value = ''
       streamingAnswer.value = ''
@@ -1084,27 +1000,74 @@ export default {
       window.scrollTo({ top: 0, behavior: 'smooth' })
     }
 
-    const renameHistoryTitle = async (id, title) => {
-      const item = history.value.find((record) => record.id === id)
-      if (!item) return
+    const selectConversation = async (item) => {
+      if (!item || loading.value) return
+      activePanel.value = 'workspace'
+      activeConversationId.value = item.id
+      pendingQuestion.value = ''
+      answer.value = ''
+      streamingAnswer.value = ''
+      resetAgentState()
+      await refreshActiveConversation()
+      closeSidebar()
+      window.scrollTo({ top: 0, behavior: 'smooth' })
+    }
 
+    const renameConversation = async (id, title) => {
+      const item = conversations.value.find((record) => record.id === id)
+      if (!item) return
       const previousTitle = item.title
       item.title = title
       try {
-        const response = await axios.patch(`/api/questions/${id}/title`, { title })
+        const response = await axios.patch(`/api/conversations/${id}`, { title })
         item.title = response.data?.title || title
         toast.success('标题已更新')
       } catch (error) {
-        console.error('修改标题失败:', error)
+        console.error('修改会话标题失败:', error)
         item.title = previousTitle
         toast.error(error.response?.data?.error || '标题更新失败，请稍后重试')
       }
     }
 
-    const deleteHistoryRecord = async (item) => {
+    const deleteConversationRecord = async (item) => {
       if (!item?.id) return
-      await deleteQuestionRecord(item)
-      if (selectedHistoryId.value === item.id) selectedHistoryId.value = null
+      try {
+        await axios.delete(`/api/conversations/${item.id}`)
+        conversations.value = conversations.value.filter((record) => record.id !== item.id)
+        if (activeConversationId.value === item.id) {
+          activeConversationId.value = null
+          turns.value = []
+          pendingQuestion.value = ''
+        }
+        toast.success('会话已删除')
+      } catch (error) {
+        console.error('删除会话失败:', error)
+        toast.error(error.response?.data?.error || '删除失败，请稍后重试')
+      }
+    }
+
+    const finalizePendingTurn = (askedQuestion) => {
+      const answerText = answer.value || streamingAnswer.value
+      if (!askedQuestion || (!answerText && !agentUi.value)) return
+      turns.value.push({
+        id: currentQuestionId.value || `local-${Date.now()}`,
+        question: askedQuestion,
+        answer: answerText,
+        mode: currentMode.value,
+        template: selectedTemplate.value,
+        style: selectedStyle.value,
+        authoritative_answer: '',
+        merged_group: null,
+        shared: false,
+        ui: agentUi.value,
+        trace: {
+          trace: agentTrace.value,
+          sources: agentSources.value,
+          durationMs: agentDuration.value
+        },
+        timestamp: new Date().toISOString()
+      })
+      pendingQuestion.value = ''
     }
 
     const showPluginHint = () => {
@@ -1126,7 +1089,8 @@ export default {
       try {
         const response = await axios.post(`/api/questions/${questionId}/share`)
         toast.success(response.data?.message || '已提交给老师')
-        await fetchQuestionHistory()
+        await refreshActiveConversation()
+        await fetchConversations()
       } catch (error) {
         console.error('提交给老师失败:', error)
         toast.error(error.response?.data?.error || '提交失败，请稍后重试')
@@ -1141,25 +1105,13 @@ export default {
       try {
         const response = await axios.delete(`/api/questions/${questionId}/share`)
         toast.success(response.data?.message || '已撤回')
-        await fetchQuestionHistory()
+        await refreshActiveConversation()
+        await fetchConversations()
       } catch (error) {
         console.error('撤回失败:', error)
         toast.error(error.response?.data?.error || '撤回失败，请稍后重试')
       } finally {
         sharingBusy.value = false
-      }
-    }
-
-    const deleteQuestionRecord = async (item) => {
-      if (!item.id) return
-
-      try {
-        await axios.delete(`/api/questions/${item.id}`)
-        history.value = history.value.filter((record) => record.id !== item.id)
-        toast.success('提问记录已删除')
-      } catch (error) {
-        console.error('删除提问记录失败:', error)
-        toast.error(error.response?.data?.error || '删除失败，请稍后重试')
       }
     }
 
@@ -1193,7 +1145,7 @@ export default {
 
     onMounted(async () => {
       await fetchAgentMeta()
-      await fetchQuestionHistory()
+      await fetchConversations()
       fetchMessages()
     })
 
@@ -1203,7 +1155,13 @@ export default {
       streamingAnswer,
       loading,
       sources,
-      history,
+      conversations,
+      turns,
+      pendingQuestion,
+      activeConversationId,
+      activeConversationTitle,
+      conversationList,
+      hasConversation,
       messages,
       messageToTeacher,
       sendingMessage,
@@ -1215,17 +1173,14 @@ export default {
       DeleteOutlined,
       sidebarOpen,
       activePanel,
-      selectedHistoryId,
-      selectedHistory,
       demoPlugins,
-      startNewQuestion,
+      startNewConversation,
       openWorkspace,
       openPlugins,
       openCampus,
-      selectHistory,
-      closeHistoryDetail,
-      renameHistoryTitle,
-      deleteHistoryRecord,
+      selectConversation,
+      renameConversation,
+      deleteConversationRecord,
       showPluginHint,
       submitQuestion,
       sendMessageToTeacher,
@@ -1235,7 +1190,6 @@ export default {
       formatFileSize,
       textPreview,
       copyAnswer,
-      deleteQuestionRecord,
       deleteMessageRecord,
       copyableAnswer,
       renderedAnswer,
@@ -1257,8 +1211,6 @@ export default {
       templateLabel,
       styleLabel,
       currentQuestionId,
-      currentQuestionShared,
-      currentQuestionAnswered,
       sharingBusy,
       shareQuestionToTeacher,
       withdrawQuestionFromTeacher
@@ -2025,5 +1977,120 @@ export default {
   margin: 10px 0 0;
   font-size: 11px;
   color: rgba(255, 255, 255, 0.42);
+}
+.conversation-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 14px;
+  padding: 10px 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.conversation-heading {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+}
+
+.conversation-heading strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.conversation-heading span {
+  flex: none;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.4);
+}
+
+.chat-thread {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  margin-bottom: 20px;
+}
+
+.chat-turn {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.chat-question-bubble {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  align-self: flex-end;
+  max-width: 86%;
+  padding: 12px 16px;
+  border-radius: 16px 16px 4px 16px;
+  border: 1px solid rgba(120, 190, 255, 0.25);
+  background: rgba(120, 190, 255, 0.1);
+}
+
+.chat-role {
+  flex: none;
+  margin-top: 2px;
+  font-size: 11px;
+  font-weight: 600;
+  color: rgba(160, 210, 255, 0.9);
+}
+
+.chat-question-bubble p {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.75;
+  color: rgba(255, 255, 255, 0.88);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.chat-answer-card {
+  padding: 16px 18px;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.chat-answer-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+  font-size: 12px;
+}
+
+.chat-answer-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.chat-answer-body {
+  font-size: 14px;
+  line-height: 1.9;
+}
+
+.chat-pending-status {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.45);
+}
+
+.chat-pending .chat-answer-card {
+  border-style: dashed;
+}
+
+.composer-dock {
+  margin-top: 6px;
 }
 </style>

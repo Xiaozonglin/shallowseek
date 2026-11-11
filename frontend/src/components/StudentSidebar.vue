@@ -3,7 +3,7 @@
     <div class="sidebar-head">
       <a-button class="new-question-btn" block @click="$emit('new-question')">
         <template #icon><plus-outlined /></template>
-        新的提问
+        新会话
       </a-button>
     </div>
 
@@ -37,7 +37,7 @@
         </button>
 
         <div v-show="!historyCollapsed" class="history-list">
-          <p v-if="history.length === 0" class="history-empty">还没有历史记录</p>
+          <p v-if="history.length === 0" class="history-empty">还没有历史会话</p>
 
           <div
             v-for="item in history"
@@ -65,18 +65,18 @@
                 <button
                   type="button"
                   class="item-action"
-                  title="重命名标题"
+                  title="重命名会话"
                   @click.stop="startRename(item)"
                 >
                   <edit-outlined />
                 </button>
                 <a-popconfirm
-                  title="确定删除这条提问记录吗？"
+                  title="确定删除这个会话吗？"
                   ok-text="删除"
                   cancel-text="取消"
                   @confirm="$emit('delete', item)"
                 >
-                  <button type="button" class="item-action item-action-danger" title="删除记录" @click.stop>
+                  <button type="button" class="item-action item-action-danger" title="删除会话" @click.stop>
                     <delete-outlined />
                   </button>
                 </a-popconfirm>
@@ -153,7 +153,7 @@ const fallbackTitle = (item) => {
     .replace(/^\[\s*(图像|文件)\s*\]\s*/, '')
     .replace(/\s+/g, ' ')
     .trim()
-  if (!raw) return '未命名提问'
+  if (!raw) return '新会话'
   return raw.length > 22 ? `${raw.slice(0, 22)}…` : raw
 }
 
