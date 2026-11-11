@@ -59,26 +59,40 @@ def _events(chunks):
 
 class AnswerModeMetaTest(unittest.TestCase):
     def test_defaults_and_validation(self):
-        self.assertEqual("learn_new", answer_modes.normalize_template(None))
-        self.assertEqual("learn_new", answer_modes.normalize_template("unknown"))
+        self.assertEqual("free", answer_modes.normalize_template(None))
+        self.assertEqual("free", answer_modes.normalize_template("unknown"))
         self.assertEqual("long_form", answer_modes.normalize_style(""))
         self.assertEqual("short_round", answer_modes.normalize_style("short_round"))
         self.assertTrue(answer_modes.is_valid_template("review_old"))
+        self.assertTrue(answer_modes.is_valid_template("free"))
         self.assertFalse(answer_modes.is_valid_template("nope"))
         self.assertTrue(answer_modes.is_valid_style("short_round"))
         self.assertFalse(answer_modes.is_valid_style("nope"))
 
     def test_metadata_and_instructions(self):
         meta = answer_modes.metadata()
-        self.assertEqual(3, len(meta["templates"]))
+        self.assertEqual(4, len(meta["templates"]))
         self.assertEqual(2, len(meta["styles"]))
-        self.assertEqual({"learn_new", "review_old", "explore_new"}, {item["id"] for item in meta["templates"]})
+        self.assertEqual(
+            {"free", "learn_new", "review_old", "explore_new"}, {item["id"] for item in meta["templates"]}
+        )
         self.assertEqual({"short_round", "long_form"}, {item["id"] for item in meta["styles"]})
 
-        text = answer_modes.mode_instructions("learn_new", "short_round")
-        self.assertIn("学习新知", text)
-        self.assertIn("逐轮短对话", text)
-        self.assertIn("变式题", text)
+        learn_new = answer_modes.mode_instructions("learn_new", "short_round")
+        self.assertIn("学习新知", learn_new)
+        self.assertIn("逐轮短对话", learn_new)
+        self.assertIn("变式题", learn_new)
+
+        free = answer_modes.mode_instructions("free", "long_form")
+        self.assertIn("自由回答", free)
+        self.assertIn("不要硬加", free)
+        self.assertIn("长对话", free)
+
+        fast = answer_modes.fast_mode_instructions("short_round")
+        self.assertIn("不套用回答模板", fast)
+        self.assertIn("逐轮短对话", fast)
+        self.assertNotIn("学习新知", fast)
+        self.assertIn("不要附加例子", fast)
 
 
 class AnswerModeRuntimeTest(unittest.TestCase):
@@ -160,11 +174,13 @@ class AnswerModeStreamTest(unittest.TestCase):
                 )
             )
 
-        self.assertIn("复习旧知", captured["system"])
+        # 快答模式不套用模板：即使前端选了复习旧知，也不会注入模板框架
+        self.assertNotIn("复习旧知", captured["system"])
+        self.assertIn("快速回答", captured["system"])
         self.assertIn("逐轮短对话", captured["system"])
 
         complete = next(event for event in events if event["type"] == "complete")
-        self.assertEqual("review_old", complete["template"])
+        self.assertEqual("free", complete["template"])
         self.assertEqual("short_round", complete["style"])
 
         with main.app.app_context():
@@ -173,7 +189,7 @@ class AnswerModeStreamTest(unittest.TestCase):
                 .order_by(main.Question.id.desc())
                 .first()
             )
-        self.assertEqual("review_old", record.template)
+        self.assertEqual("free", record.template)
         self.assertEqual("short_round", record.style)
 
     def test_deep_stream_passes_mode_to_agent_and_events(self):
