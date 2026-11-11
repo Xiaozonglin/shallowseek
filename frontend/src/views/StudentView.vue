@@ -96,6 +96,13 @@
                 </span>
               </div>
 
+              <answer-style-panel
+                v-model:template="selectedTemplate"
+                v-model:style="selectedStyle"
+                :templates="answerTemplates"
+                :styles="answerStyles"
+              />
+
               <a-form-item label="输入问题">
                 <a-textarea
                   v-model:value="question"
@@ -265,6 +272,8 @@
                 <a-tag :color="selectedHistory.mode === 'deep' ? 'blue' : 'default'">
                   {{ selectedHistory.mode === 'deep' ? '深度' : '快答' }}
                 </a-tag>
+                <a-tag color="purple">{{ templateLabel(selectedHistory.template) }}</a-tag>
+                <a-tag>{{ styleLabel(selectedHistory.style) }}</a-tag>
               </div>
 
               <div class="history-question">
@@ -400,7 +409,7 @@
 </template>
 
 <script>
-import { computed, nextTick, onMounted, ref } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import axios from 'axios'
 import { marked } from 'marked'
 import katex from 'katex'
@@ -411,6 +420,7 @@ import AnswerCards from '../components/cards/AnswerCards.vue'
 import ToolTrace from '../components/ToolTrace.vue'
 import CitationChips from '../components/cards/CitationChips.vue'
 import StudentSidebar from '../components/StudentSidebar.vue'
+import AnswerStylePanel from '../components/AnswerStylePanel.vue'
 import { readEventStream, TOOL_LABELS } from '../utils/sse'
 import { validateUI } from '../utils/uiCards'
 import { createTypewriter } from '../utils/typewriter'
@@ -447,7 +457,8 @@ export default {
     AnswerCards,
     ToolTrace,
     CitationChips,
-    StudentSidebar
+    StudentSidebar,
+    AnswerStylePanel
   },
   setup() {
     const question = ref('')
@@ -511,6 +522,51 @@ export default {
     const agentStatus = ref('')
     const currentMode = ref('deep')
     const agentMeta = ref({ uiVersion: 1, modes: ['fast', 'deep'], chapters: [] })
+
+    // 回答效果：模板 × 交流方式（localStorage 记住偏好）
+    const ANSWER_MODE_STORAGE_KEY = 'xdwe-answer-mode'
+    const DEFAULT_ANSWER_TEMPLATES = [
+      { id: 'learn_new', label: '学习新知', description: '先辨析概念边界，再用最小例子和变式题检验理解' },
+      { id: 'review_old', label: '复习旧知', description: '先自测回忆，再补易错点和记忆锚点' },
+      { id: 'explore_new', label: '探索未知', description: '从已学知识引出未知问题，给延伸方向与资料线索' }
+    ]
+    const DEFAULT_ANSWER_STYLES = [
+      { id: 'short_round', label: '逐轮短对话', description: '每轮只推进一小步，用问题引导你回答' },
+      { id: 'long_form', label: '长对话', description: '一次给出尽量完整的知识结构' }
+    ]
+    const storedAnswerMode = (() => {
+      try {
+        return JSON.parse(window.localStorage.getItem(ANSWER_MODE_STORAGE_KEY) || 'null')
+      } catch (error) {
+        return null
+      }
+    })()
+    const selectedTemplate = ref(storedAnswerMode?.template || 'learn_new')
+    const selectedStyle = ref(storedAnswerMode?.style || 'long_form')
+    const answerTemplates = computed(() => {
+      const fromMeta = agentMeta.value.answerModes?.templates
+      return Array.isArray(fromMeta) && fromMeta.length ? fromMeta : DEFAULT_ANSWER_TEMPLATES
+    })
+    const answerStyles = computed(() => {
+      const fromMeta = agentMeta.value.answerModes?.styles
+      return Array.isArray(fromMeta) && fromMeta.length ? fromMeta : DEFAULT_ANSWER_STYLES
+    })
+    const templateLabelById = computed(() =>
+      Object.fromEntries(answerTemplates.value.map((item) => [item.id, item.label]))
+    )
+    const styleLabelById = computed(() =>
+      Object.fromEntries(answerStyles.value.map((item) => [item.id, item.label]))
+    )
+    const templateLabel = (id) => templateLabelById.value[id] || '学习新知'
+    const styleLabel = (id) => styleLabelById.value[id] || '长对话'
+
+    watch([selectedTemplate, selectedStyle], ([template, style]) => {
+      try {
+        window.localStorage.setItem(ANSWER_MODE_STORAGE_KEY, JSON.stringify({ template, style }))
+      } catch (error) {
+        console.warn('保存回答效果偏好失败:', error)
+      }
+    })
 
     const chapterTitles = computed(() =>
       Object.fromEntries((agentMeta.value.chapters || []).map((chapter) => [chapter.id, chapter.title]))
@@ -800,13 +856,17 @@ export default {
               ? {
                   image: file.dataUrl.split(',')[1],
                   mode: 'fast',
-                  uiVersion: 1
+                  uiVersion: 1,
+                  template: selectedTemplate.value,
+                  style: selectedStyle.value
                 }
               : {
                   question: '',
                   file: buildFilePayload(),
                   mode: currentMode.value,
-                  uiVersion: 1
+                  uiVersion: 1,
+                  template: selectedTemplate.value,
+                  style: selectedStyle.value
                 }
           ),
           credentials: 'include'
@@ -843,9 +903,17 @@ export default {
               question: question.value,
               image: file.dataUrl.split(',')[1],
               mode: 'fast',
-              uiVersion: 1
+              uiVersion: 1,
+              template: selectedTemplate.value,
+              style: selectedStyle.value
             }
-          : { question: question.value, mode: currentMode.value, uiVersion: 1 }
+          : {
+              question: question.value,
+              mode: currentMode.value,
+              uiVersion: 1,
+              template: selectedTemplate.value,
+              style: selectedStyle.value
+            }
         const filePayload = buildFilePayload()
         if (filePayload) payload.file = filePayload
 
@@ -913,6 +981,8 @@ export default {
             answer: item.answer,
             timestamp: item.timestamp,
             mode: item.mode || 'fast',
+            template: item.template || 'learn_new',
+            style: item.style || 'long_form',
             authoritative_answer: item.authoritative_answer || '',
             shared: Boolean(item.shared),
             shared_at: item.shared_at || null,
@@ -1159,6 +1229,12 @@ export default {
       agentMeta,
       chapterTitles,
       askFollowUp,
+      selectedTemplate,
+      selectedStyle,
+      answerTemplates,
+      answerStyles,
+      templateLabel,
+      styleLabel,
       currentQuestionId,
       currentQuestionShared,
       currentQuestionAnswered,
