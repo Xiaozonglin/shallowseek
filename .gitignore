@@ -23,3 +23,6 @@ bm25_index
 
 # 迁移期本地补丁（不提交）
 migration/*.patch
+
+# 编辑器本地配置
+.vscode/

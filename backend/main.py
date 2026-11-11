@@ -863,4 +863,4 @@ if __name__ == "__main__":
     print(f"🤖 AI 服务: DeepSeek API（{os.getenv('DEEPSEEK_MODEL', 'deepseek-flash')}），不加载本地模型。")
     print("⚠️ 仅适合演示：API Key 请放在本地 .env 或环境变量中，切勿提交到仓库。\n")
 
-    app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
+    app.run(host="0.0.0.0", port=5001, debug=False, threaded=True)

@@ -56,7 +56,7 @@
 │
 ├─frontend
 │  │  index.html
-│  │  vite.config.js // 前端配置（/api 代理到 127.0.0.1:5000）
+│  │  vite.config.js // 前端配置（/api 代理到 127.0.0.1:5001）
 │  │
 │  └─src
 │      │  App.vue
@@ -76,6 +76,7 @@
 
 - Python 3.10+（**不需要 GPU / CUDA / PyTorch**）
 - Node.js 20.19+ 或 22.12+
+- 开发端口：后端默认 **5001**（避开 macOS 上被 AirPlay 接收器占用的 5000），前端 5173
 - 一个 DeepSeek API Key：<https://platform.deepseek.com/api_keys>
 
 ### 1. 后端
@@ -102,7 +103,7 @@ python smoke_deepseek.py
 python smoke_agent.py
 
 # 启动后端
-python main.py                    # http://127.0.0.1:5000
+python main.py                    # http://127.0.0.1:5001
 ```
 
 ### 2. 前端
@@ -113,7 +114,7 @@ npm install
 npm run dev                       # http://127.0.0.1:5173
 ```
 
-前端开发服务器已把 `/api` 代理到 `http://127.0.0.1:5000`，浏览器打开 5173 端口即可。
+前端开发服务器已把 `/api` 代理到 `http://127.0.0.1:5001`，浏览器打开 5173 端口即可。
 
 ### 3. 演示提示
 
