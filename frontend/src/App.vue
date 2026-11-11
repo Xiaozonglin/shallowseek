@@ -2,14 +2,6 @@
   <a-layout class="app-layout">
     <a-layout-header v-if="!isAuthPage" class="app-header">
       <div class="container header-inner">
-        <router-link to="/" class="brand-mark">
-          <span class="brand-dot"></span>
-          <div>
-            <div class="brand-title">ShallowSeek</div>
-            <div class="brand-subtitle">AI Learning Console</div>
-          </div>
-        </router-link>
-
         <div v-if="user" class="user-panel">
           <div class="user-badge" :title="user.username">
             <span class="user-avatar" aria-hidden="true">{{ userInitial }}</span>
@@ -167,41 +159,11 @@ a {
   justify-content: space-between;
 }
 
-.brand-mark {
-  display: inline-flex;
-  align-items: center;
-  gap: 14px;
-  text-decoration: none;
-}
-
-.brand-dot {
-  width: 12px;
-  height: 12px;
-  border-radius: 999px;
-  background: linear-gradient(135deg, #ffffff 0%, rgba(255, 255, 255, 0.4) 100%);
-  box-shadow: 0 0 28px rgba(255, 255, 255, 0.5);
-  animation: pulseGlow 4.2s ease-in-out infinite;
-}
-
-.brand-title {
-  font-size: 18px;
-  font-weight: 600;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-
-.brand-subtitle {
-  margin-top: 2px;
-  font-size: 11px;
-  letter-spacing: 0.18em;
-  color: var(--text-tertiary);
-  text-transform: uppercase;
-}
-
 .user-panel {
   display: flex;
   align-items: center;
   gap: 12px;
+  margin-left: auto;
 }
 
 .user-badge {
@@ -524,7 +486,27 @@ a {
 
 .ant-tag {
   border-radius: 999px;
-  border: 1px solid transparent;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.82);
+}
+
+.ant-tag-success {
+  border-color: rgba(109, 211, 160, 0.34);
+  background: rgba(109, 211, 160, 0.16);
+  color: #a7ecc7;
+}
+
+.ant-tag-warning {
+  border-color: rgba(255, 196, 102, 0.34);
+  background: rgba(255, 196, 102, 0.14);
+  color: #ffd28a;
+}
+
+.ant-tag-blue {
+  border-color: rgba(120, 170, 255, 0.34);
+  background: rgba(120, 170, 255, 0.16);
+  color: #a9c9ff;
 }
 
 .ant-collapse {
@@ -587,18 +569,6 @@ a {
   to {
     opacity: 1;
     transform: translateY(0);
-  }
-}
-
-@keyframes pulseGlow {
-  0%,
-  100% {
-    transform: scale(1);
-    box-shadow: 0 0 28px rgba(255, 255, 255, 0.45);
-  }
-  50% {
-    transform: scale(1.12);
-    box-shadow: 0 0 40px rgba(255, 255, 255, 0.62);
   }
 }
 
@@ -665,7 +635,6 @@ a {
     gap: 12px;
   }
 
-  .brand-subtitle,
   .user-label {
     display: none;
   }

@@ -102,6 +102,7 @@ class Question(db.Model):
     ui_json = db.Column(db.Text, nullable=True)
     trace_json = db.Column(db.Text, nullable=True)
     mode = db.Column(db.String(10), default='fast')
+    title = db.Column(db.String(120), nullable=True)  # 侧边栏历史标题（LLM 生成，可由学生修改）
 
 
 class Message(db.Model):
@@ -129,6 +130,29 @@ def get_user_history(user_id):
     return "\n".join([f"问：{r.content}\n答：{r.answer}" for r in records])
 
 AUTHORITATIVE_SIM_THRESHOLD = float(os.getenv("AUTHORITATIVE_SIM_THRESHOLD", "0.45"))
+
+# 侧边栏历史标题：由 LLM 概括，学生可自定义修改
+TITLE_MAX_CHARS = 24
+
+
+def _fallback_question_title(question, answer=""):
+    """LLM 不可用时的兜底标题：去掉图像/文件标记后截断原文。"""
+    for text in (question, answer):
+        cleaned = re.sub(r"^\[\s*(图像|文件)\s*\]\s*", "", (text or "").strip())
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        if cleaned:
+            return cleaned[:TITLE_MAX_CHARS]
+    return "学习提问"
+
+
+def _generate_question_title(question, answer=""):
+    """调用 LLM 生成一句历史标题；失败时退化为截断文本。"""
+    try:
+        title = ai.generate_title(question or "", answer or "", max_chars=TITLE_MAX_CHARS)
+    except Exception:
+        logger.exception("生成历史标题失败")
+        title = ""
+    return (title or _fallback_question_title(question, answer))[:TITLE_MAX_CHARS]
 
 
 def get_authoritative_context(query):
@@ -268,6 +292,7 @@ def get_student_question_history():
         {
             "id": q.id,
             "question": q.content,
+            "title": q.title or "",
             "answer": q.answer,
             "authoritative_answer": q.authoritative_answer,
             "timestamp": q.timestamp.isoformat(),
@@ -293,10 +318,33 @@ def get_agent_meta():
 
 # ========================== 核心 AI 问答路由（快答 / 深度 Agent + 智能 UI） ==========================
 QA_MODES = {"fast", "deep"}
+# 前端上传的文本文件内容单独通过 file 字段传入，与提问一起作为上下文（不计入提问长度）
+MAX_FILE_CONTEXT_CHARS = 12000
 
 
 def _sse(payload):
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+def _parse_file_payload(data):
+    """解析前端可选的上传文件：{"name": str, "content": str} -> (file_name, file_context)。"""
+    payload = data.get("file")
+    if not isinstance(payload, dict):
+        return "", ""
+
+    file_name = sanitize_input(payload.get("name") or "", max_length=80) or "未命名文件"
+    file_context = sanitize_input(payload.get("content") or "", max_length=MAX_FILE_CONTEXT_CHARS)
+    return file_name, file_context
+
+
+def _question_record_content(query, image_base64=None, file_name="", file_context=""):
+    """落库的提问摘要：带文件/图片时加简短标记，避免把大段文件正文写进历史列表。"""
+    if image_base64:
+        return f"[图像] {query[:50]}" if query else "[图像]"
+    if file_context:
+        label = f"[文件] {file_name}"
+        return f"{label} {query[:50]}" if query else label
+    return query
 
 
 def _save_question(student_id, content_text, answer_text, ui_payload=None, trace_payload=None, mode="fast"):
@@ -314,8 +362,8 @@ def _save_question(student_id, content_text, answer_text, ui_payload=None, trace
         return record.id
 
 
-def _build_fast_prompt(student_id, query, image_base64):
-    """快答模式上下文：教师权威答案 + BM25 检索 + 最近历史（无工具循环）。"""
+def _build_fast_prompt(student_id, query, image_base64, file_name="", file_context=""):
+    """快答模式上下文：教师权威答案 + BM25 检索 + 最近历史 + 上传文件（无工具循环）。"""
     context = ""
     history_text = get_user_history(student_id)
     authority_matched = False
@@ -330,27 +378,37 @@ def _build_fast_prompt(student_id, query, image_base64):
     system_content = (
         "你是专业的学习助手。请根据提供的资料、上下文或图片准确回答用户问题。"
         "如果用户上传了图片，请精确识别其中的文字、公式或逻辑结构并进行解答。"
+        "如果用户上传了文件，请先阅读文件内容，再结合用户问题作答。"
     )
     if context:
         system_content += f"\n\n背景上下文:\n{context}"
+    if file_context:
+        system_content += f"\n\n用户上传的文件「{file_name}」内容如下，请结合文件内容回答：\n{file_context}"
     if history_text:
         system_content += f"\n\n历史对话记录:\n{history_text}"
 
     image_data_url = ai.to_data_url(image_base64) if image_base64 else None
-    final_query = query or "请详细提取和描述这张图片中的所有关键信息、数字与文字。"
+    if query:
+        final_query = query
+    elif file_context:
+        final_query = "请阅读并分析用户上传的文件，提炼关键信息并给出要点。"
+    else:
+        final_query = "请详细提取和描述这张图片中的所有关键信息、数字与文字。"
     return system_content, final_query, image_data_url, authority_matched
 
 
-def _legacy_fast_stream(student_id, query, image_base64):
+def _legacy_fast_stream(student_id, query, image_base64, file_name="", file_context=""):
     """旧客户端（不传 uiVersion）：保持 data:{"token"} 契约，纯文本流式。"""
     full_answer = ""
     try:
-        system_content, final_query, image_data_url, _authority_matched = _build_fast_prompt(student_id, query, image_base64)
+        system_content, final_query, image_data_url, _authority_matched = _build_fast_prompt(
+            student_id, query, image_base64, file_name, file_context
+        )
         for token in ai.stream_answer(system_content, final_query, image_data_url=image_data_url):
             full_answer += token
             yield f"data: {json.dumps({'token': token})}\n\n"
 
-        db_content = f"[图像] {query[:50]}" if image_base64 else query
+        db_content = _question_record_content(query, image_base64, file_name, file_context)
         _save_question(student_id, db_content, full_answer, mode="fast")
         yield f"data: {json.dumps({'done': True})}\n\n"
     except Exception as exc:
@@ -358,7 +416,7 @@ def _legacy_fast_stream(student_id, query, image_base64):
         yield f"data: {json.dumps({'error': ai.friendly_error(exc)}, ensure_ascii=False)}\n\n"
 
 
-def _typed_fast_stream(student_id, query, image_base64):
+def _typed_fast_stream(student_id, query, image_base64, file_name="", file_context=""):
     """新客户端 + 快答：统一事件协议，无工具、无卡片。"""
     answer = ""
     started = _time.monotonic()
@@ -366,7 +424,7 @@ def _typed_fast_stream(student_id, query, image_base64):
         yield _sse({"type": "start", "mode": "fast", "uiVersion": 1})
         yield _sse({"type": "status", "stage": "answer", "message": "正在生成回答…"})
         system_content, final_query, image_data_url, authority_matched = _build_fast_prompt(
-            student_id, query, image_base64
+            student_id, query, image_base64, file_name, file_context
         )
         for token in ai.stream_answer(system_content, final_query, image_data_url=image_data_url):
             answer += token
@@ -389,7 +447,7 @@ def _typed_fast_stream(student_id, query, image_base64):
             "mode": "fast",
             "authorityMatched": authority_matched,
         })
-        db_content = f"[图像] {query[:50]}" if image_base64 else query
+        db_content = _question_record_content(query, image_base64, file_name, file_context)
         record_id = _save_question(student_id, db_content, answer, trace_payload=trace_payload, mode="fast")
         yield _sse({
             "type": "done",
@@ -403,8 +461,8 @@ def _typed_fast_stream(student_id, query, image_base64):
         yield _sse({"type": "error", "code": "ai_error", "message": ai.friendly_error(exc)})
 
 
-def _typed_deep_stream(student_id, query):
-    """新客户端 + 深度：进程内 Agent 工具循环，流式事件 + 卡片。"""
+def _typed_deep_stream(student_id, query, file_name="", file_context=""):
+    """新客户端 + 深度：进程内 Agent 工具循环，流式事件 + 卡片。上传文件内容并入 Agent 提问。"""
     answer = ""
     saved_ui = None
     completed = None
@@ -413,7 +471,7 @@ def _typed_deep_stream(student_id, query):
         yield _sse({"type": "start", "mode": "deep", "uiVersion": 1})
         history_text = get_user_history(student_id)
 
-        # 教师权威答案在快答/深度两条路径都必须生效：深度模式先词法匹配，再注入 Agent 提示词
+        # 教师权威答案在快答/深度两条路径都必须生效：深度模式先做词法匹配，再注入 Agent 提示词
         authority_context = get_authoritative_context(query) if query else ""
         authority_matched = bool(authority_context.strip())
         if authority_matched:
@@ -423,10 +481,18 @@ def _typed_deep_stream(student_id, query):
                 "message": "已匹配到教师权威答案，将优先采用",
             })
 
+        agent_question = query
+        if file_context:
+            file_block = f"【上传文件「{file_name}」内容】\n{file_context}"
+            agent_question = (
+                f"{query}\n\n{file_block}"
+                if query
+                else f"请阅读并分析以下文件内容，提炼关键信息并给出要点：\n\n{file_block}"
+            )
         run_kwargs = {"history_text": history_text, "ui_enabled": True}
         if authority_matched:
             run_kwargs["authoritative_context"] = authority_context
-        for event in agent_runtime.run(query, **run_kwargs):
+        for event in agent_runtime.run(agent_question, **run_kwargs):
             event_type = event.get("type")
             if event_type == "answer_delta":
                 answer += event.get("text", "")
@@ -453,7 +519,12 @@ def _typed_deep_stream(student_id, query):
             "authorityMatched": authority_matched,
         }
         record_id = _save_question(
-            student_id, query, answer, ui_payload=saved_ui, trace_payload=trace_payload, mode="deep"
+            student_id,
+            _question_record_content(query, None, file_name, file_context),
+            answer,
+            ui_payload=saved_ui,
+            trace_payload=trace_payload,
+            mode="deep",
         )
         yield _sse({
             "type": "done",
@@ -476,8 +547,9 @@ def handle_qa():
     data = flask.request.get_json(silent=True) or {}
     query = sanitize_input(data.get("question", ""))
     image_base64 = data.get("image")
+    file_name, file_context = _parse_file_payload(data)
 
-    if not query and not image_base64:
+    if not query and not image_base64 and not file_context:
         return flask.jsonify({"error": "请求内容为空"}), 400
 
     mode = str(data.get("mode") or "fast").strip().lower()
@@ -493,11 +565,11 @@ def handle_qa():
     typed = ui_version == 1
 
     if typed and mode == "deep" and not image_base64:
-        stream = _typed_deep_stream(student_id, query)
+        stream = _typed_deep_stream(student_id, query, file_name, file_context)
     elif typed:
-        stream = _typed_fast_stream(student_id, query, image_base64)
+        stream = _typed_fast_stream(student_id, query, image_base64, file_name, file_context)
     else:
-        stream = _legacy_fast_stream(student_id, query, image_base64)
+        stream = _legacy_fast_stream(student_id, query, image_base64, file_name, file_context)
 
     response = Response(stream_with_context(stream), mimetype="text/event-stream")
     response.headers["Cache-Control"] = "no-cache"
@@ -712,6 +784,43 @@ def delete_question(q_id):
     db.session.commit()
     return flask.jsonify({"message": "删除成功"}), 200
 
+
+@app.route("/api/questions/<int:q_id>/title", methods=["POST"])
+@login_required
+@rate_limit(limit=30)
+def generate_question_title(q_id):
+    """为历史记录生成 LLM 标题（幂等：已有标题也会按当前内容重新概括）。"""
+    q = db.session.get(Question, q_id)
+    if not q:
+        return flask.jsonify({"error": "问题不存在"}), 404
+    if q.student_id != current_user.id:
+        return flask.jsonify({"error": "权限不足"}), 403
+
+    title = _generate_question_title(q.content, q.answer or "")
+    q.title = title
+    db.session.commit()
+    return flask.jsonify({"title": title}), 200
+
+
+@app.route("/api/questions/<int:q_id>/title", methods=["PATCH"])
+@login_required
+def update_question_title(q_id):
+    """学生自定义修改历史标题。"""
+    q = db.session.get(Question, q_id)
+    if not q:
+        return flask.jsonify({"error": "问题不存在"}), 404
+    if q.student_id != current_user.id:
+        return flask.jsonify({"error": "权限不足"}), 403
+
+    data = flask.request.get_json(silent=True) or {}
+    title = re.sub(r"\s+", " ", sanitize_input(data.get("title", ""), max_length=80)).strip()
+    if not title:
+        return flask.jsonify({"error": "标题不能为空"}), 400
+
+    q.title = title[:TITLE_MAX_CHARS]
+    db.session.commit()
+    return flask.jsonify({"title": q.title}), 200
+
 # ========================== 安全响应头中间件 ==========================
 @app.after_request
 def add_security_headers(response):
@@ -740,7 +849,7 @@ def ensure_schema():
         if "question" not in inspector.get_table_names():
             return
         columns = {column["name"] for column in inspector.get_columns("question")}
-        additions = {"ui_json": "TEXT", "trace_json": "TEXT", "mode": "VARCHAR(10)"}
+        additions = {"ui_json": "TEXT", "trace_json": "TEXT", "mode": "VARCHAR(10)", "title": "VARCHAR(120)"}
         with db.engine.begin() as connection:
             for name, ddl in additions.items():
                 if name not in columns:
