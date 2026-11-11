@@ -92,6 +92,16 @@ class User(UserMixin, db.Model):
     summary_updated_at = db.Column(db.DateTime, nullable=True)
 
 
+class Conversation(db.Model):
+    """一次会话：包含多轮「学生提问 + AI 回答」，侧边栏按会话展示。"""
+
+    id = db.Column(db.Integer, primary_key=True)
+    student_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    title = db.Column(db.String(120), nullable=False, default='')
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+
 class Question(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     content = db.Column(db.String(1000), nullable=False)
@@ -113,6 +123,8 @@ class Question(db.Model):
     style = db.Column(db.String(20), default=answer_modes.DEFAULT_STYLE)
     # 共性问题合并：同一组问题共享老师的一次合并回复
     group_id = db.Column(db.Integer, db.ForeignKey('question_group.id'), nullable=True)
+    # 多轮会话：每一轮问答归属一个会话
+    conversation_id = db.Column(db.Integer, db.ForeignKey('conversation.id'), nullable=True)
 
 
 class QuestionGroup(db.Model):
@@ -147,6 +159,20 @@ def get_user_history(user_id):
     records = Question.query.filter_by(student_id=user_id).order_by(Question.timestamp.desc()).limit(3).all()
     records.reverse()
     return "\n".join([f"问：{r.content}\n答：{r.answer}" for r in records])
+
+
+def get_conversation_history(student_id, conversation_id, limit=6):
+    """按会话取最近 N 轮问答，作为本轮多轮上下文。"""
+    if not conversation_id:
+        return get_user_history(student_id)
+    records = (
+        Question.query.filter_by(student_id=student_id, conversation_id=conversation_id)
+        .order_by(Question.timestamp.desc())
+        .limit(limit)
+        .all()
+    )
+    records.reverse()
+    return "\n".join(f"问：{record.content}\n答：{record.answer or ''}" for record in records)
 
 AUTHORITATIVE_SIM_THRESHOLD = float(os.getenv("AUTHORITATIVE_SIM_THRESHOLD", "0.45"))
 
@@ -474,7 +500,7 @@ def _question_record_content(query, image_base64=None, file_name="", file_contex
     return query
 
 
-def _save_question(student_id, content_text, answer_text, ui_payload=None, trace_payload=None, mode="fast", template=None, style=None):
+def _save_question(student_id, content_text, answer_text, ui_payload=None, trace_payload=None, mode="fast", template=None, style=None, conversation_id=None):
     with app.app_context():
         record = Question(
             content=content_text,
@@ -485,16 +511,26 @@ def _save_question(student_id, content_text, answer_text, ui_payload=None, trace
             mode=mode,
             template=answer_modes.normalize_template(template),
             style=answer_modes.normalize_style(style),
+            conversation_id=conversation_id,
         )
         db.session.add(record)
         db.session.commit()
+
+        if conversation_id:
+            conversation = db.session.get(Conversation, conversation_id)
+            if conversation:
+                conversation.updated_at = datetime.utcnow()
+                if not conversation.title:
+                    conversation.title = (content_text or "新的会话")[:20]
+                db.session.commit()
+
         return record.id
 
 
-def _build_fast_prompt(student_id, query, image_base64, file_name="", file_context="", template=None, style=None):
+def _build_fast_prompt(student_id, query, image_base64, file_name="", file_context="", template=None, style=None, conversation_id=None):
     """快答模式上下文：教师权威答案 + BM25 检索 + 最近历史 + 上传文件 + 回答效果（无工具循环）。"""
     context = ""
-    history_text = get_user_history(student_id)
+    history_text = get_conversation_history(student_id, conversation_id)
     authority_matched = False
     if query:
         if not image_base64:
@@ -527,36 +563,36 @@ def _build_fast_prompt(student_id, query, image_base64, file_name="", file_conte
     return system_content, final_query, image_data_url, authority_matched
 
 
-def _legacy_fast_stream(student_id, query, image_base64, file_name="", file_context="", template=None, style=None):
+def _legacy_fast_stream(student_id, query, image_base64, file_name="", file_context="", template=None, style=None, conversation_id=None):
     """旧客户端（不传 uiVersion）：保持 data:{"token"} 契约，纯文本流式。"""
     full_answer = ""
     try:
         system_content, final_query, image_data_url, _authority_matched = _build_fast_prompt(
-            student_id, query, image_base64, file_name, file_context, template, style
+            student_id, query, image_base64, file_name, file_context, template, style, conversation_id
         )
         for token in ai.stream_answer(system_content, final_query, image_data_url=image_data_url):
             full_answer += token
             yield f"data: {json.dumps({'token': token})}\n\n"
 
         db_content = _question_record_content(query, image_base64, file_name, file_context)
-        _save_question(student_id, db_content, full_answer, mode="fast", template=template, style=style)
+        _save_question(student_id, db_content, full_answer, mode="fast", template=template, style=style, conversation_id=conversation_id)
         yield f"data: {json.dumps({'done': True})}\n\n"
     except Exception as exc:
         logger.exception("AI 回答失败")
         yield f"data: {json.dumps({'error': ai.friendly_error(exc)}, ensure_ascii=False)}\n\n"
 
 
-def _typed_fast_stream(student_id, query, image_base64, file_name="", file_context="", template=None, style=None):
+def _typed_fast_stream(student_id, query, image_base64, file_name="", file_context="", template=None, style=None, conversation_id=None):
     """新客户端 + 快答：统一事件协议，无工具、无卡片。"""
     answer = ""
     template_id = answer_modes.normalize_template(template)
     style_id = answer_modes.normalize_style(style)
     started = _time.monotonic()
     try:
-        yield _sse({"type": "start", "mode": "fast", "uiVersion": 1})
+        yield _sse({"type": "start", "mode": "fast", "uiVersion": 1, "conversationId": conversation_id})
         yield _sse({"type": "status", "stage": "answer", "message": "正在生成回答…"})
         system_content, final_query, image_data_url, authority_matched = _build_fast_prompt(
-            student_id, query, image_base64, file_name, file_context, template_id, style_id
+            student_id, query, image_base64, file_name, file_context, template_id, style_id, conversation_id
         )
         for token in ai.stream_answer(system_content, final_query, image_data_url=image_data_url):
             answer += token
@@ -582,10 +618,18 @@ def _typed_fast_stream(student_id, query, image_base64, file_name="", file_conte
             "authorityMatched": authority_matched,
             "template": template_id,
             "style": style_id,
+            "conversationId": conversation_id,
         })
         db_content = _question_record_content(query, image_base64, file_name, file_context)
         record_id = _save_question(
-            student_id, db_content, answer, trace_payload=trace_payload, mode="fast", template=template_id, style=style_id
+            student_id,
+            db_content,
+            answer,
+            trace_payload=trace_payload,
+            mode="fast",
+            template=template_id,
+            style=style_id,
+            conversation_id=conversation_id,
         )
         yield _sse({
             "type": "done",
@@ -595,13 +639,14 @@ def _typed_fast_stream(student_id, query, image_base64, file_name="", file_conte
             "authorityMatched": authority_matched,
             "template": template_id,
             "style": style_id,
+            "conversationId": conversation_id,
         })
     except Exception as exc:
         logger.exception("AI 回答失败")
         yield _sse({"type": "error", "code": "ai_error", "message": ai.friendly_error(exc)})
 
 
-def _typed_deep_stream(student_id, query, file_name="", file_context="", template=None, style=None):
+def _typed_deep_stream(student_id, query, file_name="", file_context="", template=None, style=None, conversation_id=None):
     """新客户端 + 深度：进程内 Agent 工具循环，流式事件 + 卡片。上传文件内容并入 Agent 提问。"""
     answer = ""
     template_id = answer_modes.normalize_template(template)
@@ -610,8 +655,8 @@ def _typed_deep_stream(student_id, query, file_name="", file_context="", templat
     completed = None
     failed = False
     try:
-        yield _sse({"type": "start", "mode": "deep", "uiVersion": 1})
-        history_text = get_user_history(student_id)
+        yield _sse({"type": "start", "mode": "deep", "uiVersion": 1, "conversationId": conversation_id})
+        history_text = get_conversation_history(student_id, conversation_id)
 
         # 教师权威答案在快答/深度两条路径都必须生效：深度模式先做词法匹配，再注入 Agent 提示词
         authority_context = get_authoritative_context(query) if query else ""
@@ -681,6 +726,7 @@ def _typed_deep_stream(student_id, query, file_name="", file_context="", templat
             mode="deep",
             template=template_id,
             style=style_id,
+            conversation_id=conversation_id,
         )
         yield _sse({
             "type": "done",
@@ -691,6 +737,7 @@ def _typed_deep_stream(student_id, query, file_name="", file_context="", templat
             "authorityMatched": authority_matched,
             "template": template_id,
             "style": style_id,
+            "conversationId": conversation_id,
         })
     except Exception as exc:
         logger.exception("Agent 回答失败")
@@ -731,12 +778,31 @@ def handle_qa():
     student_id = current_user.id
     typed = ui_version == 1
 
-    if typed and mode == "deep" and not image_base64:
-        stream = _typed_deep_stream(student_id, query, file_name, file_context, template, style)
-    elif typed:
-        stream = _typed_fast_stream(student_id, query, image_base64, file_name, file_context, template, style)
+    # 多轮会话：带上 conversationId 则续聊；否则新建一个会话（兼容旧客户端）
+    conversation_id = None
+    raw_conversation_id = data.get("conversationId")
+    if raw_conversation_id not in (None, "", 0):
+        try:
+            conversation_id = int(raw_conversation_id)
+        except (TypeError, ValueError):
+            return flask.jsonify({"error": "conversationId 不合法"}), 400
+        conversation = db.session.get(Conversation, conversation_id)
+        if not conversation:
+            return flask.jsonify({"error": "会话不存在"}), 404
+        if conversation.student_id != student_id:
+            return flask.jsonify({"error": "权限不足"}), 403
     else:
-        stream = _legacy_fast_stream(student_id, query, image_base64, file_name, file_context, template, style)
+        conversation = Conversation(student_id=student_id, title="")
+        db.session.add(conversation)
+        db.session.commit()
+        conversation_id = conversation.id
+
+    if typed and mode == "deep" and not image_base64:
+        stream = _typed_deep_stream(student_id, query, file_name, file_context, template, style, conversation_id)
+    elif typed:
+        stream = _typed_fast_stream(student_id, query, image_base64, file_name, file_context, template, style, conversation_id)
+    else:
+        stream = _legacy_fast_stream(student_id, query, image_base64, file_name, file_context, template, style, conversation_id)
 
     response = Response(stream_with_context(stream), mimetype="text/event-stream")
     response.headers["Cache-Control"] = "no-cache"
@@ -1014,6 +1080,163 @@ def update_question_title(q_id):
     db.session.commit()
     return flask.jsonify({"title": q.title}), 200
 
+# ========================== 多轮会话 ==========================
+def _conversation_turn_payload(question):
+    def _load(raw):
+        if not raw:
+            return None
+        try:
+            return json.loads(raw)
+        except (TypeError, ValueError):
+            return None
+
+    return {
+        "id": question.id,
+        "question": question.content,
+        "title": question.title or "",
+        "answer": question.answer,
+        "authoritative_answer": _effective_authoritative_answer(question),
+        "merged_group": _merged_group_info(question),
+        "timestamp": question.timestamp.isoformat(),
+        "mode": question.mode or "fast",
+        "template": question.template or answer_modes.DEFAULT_TEMPLATE,
+        "style": question.style or answer_modes.DEFAULT_STYLE,
+        "ui": _load(question.ui_json),
+        "trace": _load(question.trace_json),
+        "shared": bool(question.shared),
+        "shared_at": question.shared_at.isoformat() if question.shared_at else None,
+    }
+
+
+def _conversation_payload(conversation, include_turns=False):
+    turns = (
+        Question.query.filter_by(conversation_id=conversation.id)
+        .order_by(Question.timestamp.asc())
+        .all()
+    )
+    payload = {
+        "id": conversation.id,
+        "title": conversation.title or "新的会话",
+        "created_at": conversation.created_at.isoformat() if conversation.created_at else None,
+        "updated_at": conversation.updated_at.isoformat() if conversation.updated_at else None,
+        "turn_count": len(turns),
+        "last_question": turns[-1].content if turns else "",
+        "shared_count": sum(1 for item in turns if item.shared),
+        "has_reply": any(_effective_authoritative_answer(item) for item in turns),
+    }
+    if include_turns:
+        payload["turns"] = [_conversation_turn_payload(item) for item in turns]
+    return payload
+
+
+def _owned_conversation(conversation_id):
+    conversation = db.session.get(Conversation, conversation_id)
+    if not conversation:
+        return None, (flask.jsonify({"error": "会话不存在"}), 404)
+    if conversation.student_id != current_user.id:
+        return None, (flask.jsonify({"error": "权限不足"}), 403)
+    return conversation, None
+
+
+@app.route("/api/conversations", methods=["GET"])
+@login_required
+def list_conversations():
+    if current_user.role != "student":
+        return flask.jsonify({"error": "权限不足"}), 403
+    conversations = (
+        Conversation.query.filter_by(student_id=current_user.id)
+        .order_by(Conversation.updated_at.desc())
+        .limit(50)
+        .all()
+    )
+    return flask.jsonify([_conversation_payload(item) for item in conversations]), 200
+
+
+@app.route("/api/conversations", methods=["POST"])
+@login_required
+@rate_limit(limit=30)
+def create_conversation():
+    if current_user.role != "student":
+        return flask.jsonify({"error": "权限不足"}), 403
+    data = flask.request.get_json(silent=True) or {}
+    title = sanitize_input(data.get("title") or "", max_length=40).strip()
+    conversation = Conversation(student_id=current_user.id, title=title or "")
+    db.session.add(conversation)
+    db.session.commit()
+    return flask.jsonify(_conversation_payload(conversation)), 201
+
+
+@app.route("/api/conversations/<int:conversation_id>/messages", methods=["GET"])
+@login_required
+def get_conversation_messages(conversation_id):
+    conversation, error = _owned_conversation(conversation_id)
+    if error:
+        return error
+    return flask.jsonify(_conversation_payload(conversation, include_turns=True)), 200
+
+
+@app.route("/api/conversations/<int:conversation_id>", methods=["PATCH"])
+@login_required
+def update_conversation(conversation_id):
+    conversation, error = _owned_conversation(conversation_id)
+    if error:
+        return error
+    data = flask.request.get_json(silent=True) or {}
+    title = re.sub(r"\s+", " ", sanitize_input(data.get("title") or "", max_length=80)).strip()
+    if not title:
+        return flask.jsonify({"error": "标题不能为空"}), 400
+    conversation.title = title[:60]
+    conversation.updated_at = datetime.utcnow()
+    db.session.commit()
+    return flask.jsonify(_conversation_payload(conversation)), 200
+
+
+@app.route("/api/conversations/<int:conversation_id>/title", methods=["POST"])
+@login_required
+@rate_limit(limit=20)
+def generate_conversation_title(conversation_id):
+    conversation, error = _owned_conversation(conversation_id)
+    if error:
+        return error
+    first = (
+        Question.query.filter_by(conversation_id=conversation.id)
+        .order_by(Question.timestamp.asc())
+        .first()
+    )
+    if not first:
+        return flask.jsonify({"error": "会话还没有内容"}), 400
+    title = _generate_question_title(first.content, first.answer or "")
+    conversation.title = title
+    conversation.updated_at = datetime.utcnow()
+    db.session.commit()
+    return flask.jsonify({"title": title}), 200
+
+
+@app.route("/api/conversations/<int:conversation_id>", methods=["DELETE"])
+@login_required
+def delete_conversation(conversation_id):
+    conversation, error = _owned_conversation(conversation_id)
+    if error:
+        return error
+
+    turns = Question.query.filter_by(conversation_id=conversation.id).all()
+    group_ids = {item.group_id for item in turns if item.group_id}
+    for item in turns:
+        db.session.delete(item)
+    db.session.delete(conversation)
+    db.session.commit()
+
+    for group_id in group_ids:
+        remaining = Question.query.filter_by(group_id=group_id).count()
+        if remaining == 0:
+            group = db.session.get(QuestionGroup, group_id)
+            if group:
+                db.session.delete(group)
+                db.session.commit()
+
+    return flask.jsonify({"message": "会话已删除"}), 200
+
+
 # ========================== 共性问题合并 ==========================
 def _group_payload(group, include_questions=True):
     members = (
@@ -1222,6 +1445,7 @@ def ensure_schema():
             "template": "VARCHAR(20)",
             "style": "VARCHAR(20)",
             "group_id": "INTEGER",
+            "conversation_id": "INTEGER",
         }
         first_privacy_migration = "shared" not in columns
         with db.engine.begin() as connection:
@@ -1231,6 +1455,20 @@ def ensure_schema():
             if first_privacy_migration:
                 # 旧缓存可能包含学生未同意的问答，隐私边界上线时统一作废
                 connection.execute(sql_text("UPDATE user SET learning_summary = NULL, summary_updated_at = NULL"))
+        if "conversation_id" not in columns:
+            # 多轮会话上线：把旧问答各自回填为一个会话，保证侧边栏历史不丢
+            legacy_questions = Question.query.filter(Question.conversation_id.is_(None)).all()
+            for item in legacy_questions:
+                conversation = Conversation(
+                    student_id=item.student_id,
+                    title=(item.title or (item.content or "历史提问"))[:20],
+                    created_at=item.timestamp or datetime.utcnow(),
+                    updated_at=item.timestamp or datetime.utcnow(),
+                )
+                db.session.add(conversation)
+                db.session.flush()
+                item.conversation_id = conversation.id
+            db.session.commit()
 
 
 if __name__ == "__main__":
