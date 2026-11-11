@@ -281,6 +281,17 @@
                 <h3>{{ selectedHistory.question }}</h3>
               </div>
               <div class="history-answer markdown-body" v-html="renderHistoryAnswer(selectedHistory.answer)"></div>
+
+              <div v-if="selectedHistory.authoritative_answer" class="teacher-reply">
+                <div class="teacher-reply-head">
+                  <span class="teacher-reply-label">老师回复</span>
+                  <a-tag v-if="selectedHistory.merged_group" color="blue">合并了同类问题</a-tag>
+                </div>
+                <div class="teacher-reply-body">{{ selectedHistory.authoritative_answer }}</div>
+                <p v-if="selectedHistory.merged_group" class="teacher-reply-note">
+                  这条回复合并了同类问题：{{ selectedHistory.merged_group.title }}
+                </p>
+              </div>
               <answer-cards
                 v-if="selectedHistory.ui"
                 :ui="selectedHistory.ui"
@@ -984,6 +995,7 @@ export default {
             template: item.template || 'learn_new',
             style: item.style || 'long_form',
             authoritative_answer: item.authoritative_answer || '',
+            merged_group: item.merged_group || null,
             shared: Boolean(item.shared),
             shared_at: item.shared_at || null,
             ui: validated,
@@ -1971,5 +1983,38 @@ export default {
 
 .privacy-icon.is-accepted {
   color: rgba(140, 220, 160, 0.9);
+}
+.teacher-reply {
+  margin-top: 18px;
+  padding: 14px 16px;
+  border-radius: 14px;
+  border: 1px solid rgba(140, 220, 160, 0.3);
+  background: rgba(140, 220, 160, 0.06);
+}
+
+.teacher-reply-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.teacher-reply-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: rgba(170, 230, 185, 0.95);
+}
+
+.teacher-reply-body {
+  font-size: 13px;
+  line-height: 1.8;
+  color: rgba(255, 255, 255, 0.82);
+  white-space: pre-wrap;
+}
+
+.teacher-reply-note {
+  margin: 10px 0 0;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.42);
 }
 </style>

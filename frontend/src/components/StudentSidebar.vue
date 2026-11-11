@@ -51,6 +51,7 @@
             <template v-else>
               <span class="history-title" :title="displayTitle(item)">{{ displayTitle(item) }}</span>
               <span v-if="item.shared" class="history-shared">已提交</span>
+              <span v-if="item.authoritative_answer" class="history-replied">已回复</span>
               <span class="history-actions">
                 <button
                   type="button"
@@ -489,5 +490,15 @@ const commitRename = () => {
   color: rgba(140, 220, 160, 0.9);
   border: 1px solid rgba(140, 220, 160, 0.35);
   background: rgba(140, 220, 160, 0.08);
+}
+.history-replied {
+  flex: none;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  line-height: 1.6;
+  color: rgba(160, 210, 255, 0.9);
+  border: 1px solid rgba(120, 190, 255, 0.35);
+  background: rgba(120, 190, 255, 0.08);
 }
 </style>

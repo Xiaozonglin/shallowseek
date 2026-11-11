@@ -23,7 +23,7 @@ class QuestionPrivacyTest(unittest.TestCase):
     def setUpClass(cls):
         main.app.config["TESTING"] = True
         with main.app.app_context():
-            main.db.create_all()
+            main.ensure_schema()
 
             def ensure_user(username, role):
                 user = main.User.query.filter_by(username=username).first()

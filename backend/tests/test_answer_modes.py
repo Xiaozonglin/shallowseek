@@ -114,7 +114,7 @@ class AnswerModeStreamTest(unittest.TestCase):
     def setUpClass(cls):
         main.app.config["TESTING"] = True
         with main.app.app_context():
-            main.db.create_all()
+            main.ensure_schema()
             username = f"am_{uuid.uuid4().hex[:8]}"
             student = main.User(
                 username=username,
