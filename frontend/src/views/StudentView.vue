@@ -207,6 +207,7 @@
                 v-model:style="selectedStyle"
                 :templates="answerTemplates"
                 :styles="answerStyles"
+                :mode="currentMode"
               />
 
               <a-form-item label="输入问题">
@@ -465,8 +466,9 @@ export default {
     const agentMeta = ref({ uiVersion: 1, modes: ['fast', 'deep'], chapters: [] })
 
     // 回答效果：模板 × 交流方式（localStorage 记住偏好）
-    const ANSWER_MODE_STORAGE_KEY = 'xdwe-answer-mode'
+    const ANSWER_MODE_STORAGE_KEY = 'xdwe-answer-mode-v2'
     const DEFAULT_ANSWER_TEMPLATES = [
+      { id: 'free', label: '自由回答', description: '不套用固定框架，按问题类型直接作答（事实查询直接回答）' },
       { id: 'learn_new', label: '学习新知', description: '先辨析概念边界，再用最小例子和变式题检验理解' },
       { id: 'review_old', label: '复习旧知', description: '先自测回忆，再补易错点和记忆锚点' },
       { id: 'explore_new', label: '探索未知', description: '从已学知识引出未知问题，给延伸方向与资料线索' }
@@ -482,7 +484,7 @@ export default {
         return null
       }
     })()
-    const selectedTemplate = ref(storedAnswerMode?.template || 'learn_new')
+    const selectedTemplate = ref(storedAnswerMode?.template || 'free')
     const selectedStyle = ref(storedAnswerMode?.style || 'long_form')
     const answerTemplates = computed(() => {
       const fromMeta = agentMeta.value.answerModes?.templates
@@ -498,7 +500,7 @@ export default {
     const styleLabelById = computed(() =>
       Object.fromEntries(answerStyles.value.map((item) => [item.id, item.label]))
     )
-    const templateLabel = (id) => templateLabelById.value[id] || '学习新知'
+    const templateLabel = (id) => templateLabelById.value[id] || '自由回答'
     const styleLabel = (id) => styleLabelById.value[id] || '长对话'
 
     watch([selectedTemplate, selectedStyle], ([template, style]) => {
