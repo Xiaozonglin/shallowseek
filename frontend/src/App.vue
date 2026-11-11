@@ -10,15 +10,18 @@
           </div>
         </router-link>
 
-        <a-space v-if="user" size="middle" class="user-panel">
-          <div class="user-badge">
-            <span class="user-label">当前账号</span>
-            <span class="user-name">{{ user.username }}</span>
+        <div v-if="user" class="user-panel">
+          <div class="user-badge" :title="user.username">
+            <span class="user-avatar" aria-hidden="true">{{ userInitial }}</span>
+            <span class="user-text">
+              <span class="user-label">当前账号</span>
+              <span class="user-name">{{ user.username }}</span>
+            </span>
           </div>
           <a-button class="ghost-button" @click="handleLogout">
             退出登录
           </a-button>
-        </a-space>
+        </div>
       </div>
     </a-layout-header>
 
@@ -45,6 +48,11 @@ import axios from 'axios'
 const route = useRoute()
 const router = useRouter()
 const user = ref(null)
+
+const userInitial = computed(() => {
+  const name = user.value?.username || '?'
+  return String(name).slice(0, 1).toUpperCase()
+})
 
 const isAuthPage = computed(() => route.path === '/login' || route.path === '/register')
 
@@ -193,24 +201,57 @@ a {
 .user-panel {
   display: flex;
   align-items: center;
+  gap: 12px;
 }
 
 .user-badge {
-  padding: 10px 14px;
-  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  height: 40px;
+  padding: 0 14px 0 8px;
+  border-radius: 14px;
   background: rgba(255, 255, 255, 0.04);
   border: 1px solid var(--border-soft);
+  line-height: 1;
+  white-space: nowrap;
   animation: fadeUp 0.8s ease both;
 }
 
-.user-label {
-  margin-right: 8px;
-  color: var(--text-tertiary);
+.user-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
   font-size: 12px;
+  font-weight: 600;
+  color: #0b0b0b;
+  background: linear-gradient(135deg, #eef6ff 0%, #9cc8ff 100%);
+}
+
+.user-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.user-label {
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  color: var(--text-tertiary);
+  line-height: 1;
 }
 
 .user-name {
-  font-size: 14px;
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 13px;
+  line-height: 1.1;
   color: var(--text-primary);
 }
 

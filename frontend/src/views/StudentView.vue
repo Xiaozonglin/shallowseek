@@ -261,6 +261,7 @@ import ToolTrace from '../components/ToolTrace.vue'
 import CitationChips from '../components/cards/CitationChips.vue'
 import { readEventStream, TOOL_LABELS } from '../utils/sse'
 import { validateUI } from '../utils/uiCards'
+import { createTypewriter } from '../utils/typewriter'
 
 export default {
   name: 'StudentView',
@@ -297,6 +298,11 @@ export default {
     const chapterTitles = computed(() =>
       Object.fromEntries((agentMeta.value.chapters || []).map((chapter) => [chapter.id, chapter.title]))
     )
+
+    // 把网络突发到达的 token 平滑打印出来，避免“等几秒后整段出现”
+    const typewriter = createTypewriter((chunk) => {
+      streamingAnswer.value += chunk
+    })
 
     marked.setOptions({
       breaks: true,
@@ -413,6 +419,7 @@ export default {
     }
 
     const resetAgentState = () => {
+      typewriter.reset()
       agentUi.value = null
       agentSources.value = []
       agentTrace.value = []
@@ -422,6 +429,8 @@ export default {
 
     const consumeStream = async (response) => {
       let serverError = ''
+      let completedEvent = null
+
       await readEventStream(response, (event) => {
         switch (event.type) {
           case 'start':
@@ -437,25 +446,18 @@ export default {
             agentStatus.value = event.summary || agentStatus.value
             break
           case 'answer_delta':
-            streamingAnswer.value += sanitizeAnswer(event.text || '')
+            typewriter.push(sanitizeAnswer(event.text || ''))
             break
           case 'answer_reset':
+            typewriter.reset()
             streamingAnswer.value = ''
             break
           case 'ui':
             agentUi.value = event.ui || null
             break
-          case 'complete': {
-            answer.value = event.answer || streamingAnswer.value
-            agentSources.value = event.sources || []
-            agentTrace.value = event.trace || []
-            agentDuration.value = event.durationMs || 0
-            if (agentUi.value) {
-              const chapterSet = new Set(Object.keys(chapterTitles.value))
-              agentUi.value = validateUI(agentUi.value, agentSources.value, chapterSet).ui
-            }
+          case 'complete':
+            completedEvent = event
             break
-          }
           case 'error':
             serverError = event.message || 'AI 服务暂时不可用'
             break
@@ -463,7 +465,25 @@ export default {
             break
         }
       })
-      if (serverError) throw new Error(serverError)
+
+      if (serverError) {
+        typewriter.flush()
+        throw new Error(serverError)
+      }
+
+      // 等打字机把缓冲吐完，再切到最终回答，避免最后一段“跳变”
+      await typewriter.drained()
+
+      if (completedEvent) {
+        answer.value = completedEvent.answer || streamingAnswer.value
+        agentSources.value = completedEvent.sources || []
+        agentTrace.value = completedEvent.trace || []
+        agentDuration.value = completedEvent.durationMs || 0
+        if (agentUi.value) {
+          const chapterSet = new Set(Object.keys(chapterTitles.value))
+          agentUi.value = validateUI(agentUi.value, agentSources.value, chapterSet).ui
+        }
+      }
       if (!answer.value) answer.value = streamingAnswer.value
     }
 
