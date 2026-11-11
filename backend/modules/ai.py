@@ -5,6 +5,7 @@
 
 - ``stream_answer``：SSE 流式回答（文本 / 图片）
 - ``generate_text``：非流式生成（学情分析等）
+- ``generate_title``：用 LLM 把提问概括成历史记录标题
 - ``analyze_image_standalone``：纯图片解析（``/api/upload/image``）
 - ``retrieve_context``：知识库词法检索上下文
 - ``text_similarity``：权威答案匹配 / 留言去重
@@ -30,6 +31,10 @@ DEFAULT_SYSTEM_PROMPT = (
     "如果用户上传了图片，请精确识别其中的文字、公式或逻辑结构并进行解答。"
 )
 DEFAULT_VISION_PROMPT = "请提取图片中的所有文字、数字和公式，并对图片内容进行详细总结。"
+TITLE_SYSTEM_PROMPT = (
+    "你是历史记录标题助手。请用不超过 12 个汉字概括用户这次学习提问的主题，"
+    "只输出标题本身，不要标点、引号或解释。"
+)
 
 _IMAGE_DATA_URL_PREFIX = "data:image/"
 
@@ -139,6 +144,43 @@ class AIEngine:
             return ""
         content = response.choices[0].message.content
         return (content or "").strip()
+
+    def generate_title(self, question: str, answer: str = "", max_chars: int = 24) -> str:
+        """用 LLM 把「提问 + 回答」概括成一句短标题（侧边栏历史记录展示用）。"""
+        prompt = f"用户提问：{(question or '').strip()[:600]}"
+        if answer:
+            prompt += f"\n回答摘要：{answer.strip()[:400]}"
+
+        # 标题只需要极短输出，思考模式会挤占 max_tokens，这里显式关闭
+        extra = self.extra_body()
+        if self.thinking == "enabled":
+            extra = {"extra_body": {"thinking": {"type": "disabled"}}}
+
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": TITLE_SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.3,
+                max_tokens=48,
+                **extra,
+            )
+        except Exception:
+            logger.exception("生成历史标题失败")
+            return ""
+
+        if not response.choices:
+            return ""
+
+        title = (response.choices[0].message.content or "").strip()
+        title = re.sub(r"\s+", " ", title)
+        title = title.strip(" \t\"'“”‘’《》[]【】")
+        title = re.sub(r"^[0-9]+[.、)）\s]+", "", title).strip()
+        if not title:
+            return ""
+        return title[:max_chars]
 
     def analyze_image_standalone(self, image_b64: str) -> str:
         """纯图片解析：交给 deepseek-flash 的视觉能力完成。"""
