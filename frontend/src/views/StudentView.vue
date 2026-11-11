@@ -200,6 +200,40 @@
                   @follow-up="askFollowUp"
                 />
               </div>
+
+              <div v-if="currentQuestionId" class="privacy-bar">
+                <div class="privacy-copy">
+                  <lock-outlined v-if="!currentQuestionShared" class="privacy-icon" />
+                  <safety-certificate-outlined v-else class="privacy-icon is-accepted" />
+                  <span v-if="!currentQuestionShared">
+                    这次问答默认<strong>仅自己可见</strong>，不会自动同步给老师。
+                  </span>
+                  <span v-else-if="currentQuestionAnswered">
+                    已提交给老师，老师已回复；这条问答会保留在课程记录中。
+                  </span>
+                  <span v-else>
+                    已提交给老师，老师可以查看并回复；老师回复前可撤回。
+                  </span>
+                </div>
+                <a-button
+                  v-if="!currentQuestionShared"
+                  type="primary"
+                  size="small"
+                  :loading="sharingBusy"
+                  @click="shareQuestionToTeacher(currentQuestionId)"
+                >
+                  提交给老师
+                </a-button>
+                <a-button
+                  v-else-if="!currentQuestionAnswered"
+                  size="small"
+                  :loading="sharingBusy"
+                  @click="withdrawQuestionFromTeacher(currentQuestionId)"
+                >
+                  撤回
+                </a-button>
+                <a-tag v-else color="green">老师已回复</a-tag>
+              </div>
             </a-card>
           </transition>
 
@@ -251,6 +285,38 @@
                 :duration-ms="selectedHistory.trace.durationMs || 0"
                 compact
               />
+
+              <div class="privacy-bar privacy-bar-detail">
+                <div class="privacy-copy">
+                  <lock-outlined v-if="!selectedHistory.shared" class="privacy-icon" />
+                  <safety-certificate-outlined v-else class="privacy-icon is-accepted" />
+                  <span v-if="!selectedHistory.shared">
+                    这条问答默认<strong>仅自己可见</strong>，不会自动同步给老师。
+                  </span>
+                  <span v-else-if="selectedHistory.authoritative_answer">
+                    已提交给老师，老师已回复；该问答会保留在课程记录中。
+                  </span>
+                  <span v-else>已提交给老师，老师可以查看并回复；老师回复前可撤回。</span>
+                </div>
+                <a-button
+                  v-if="!selectedHistory.shared"
+                  type="primary"
+                  size="small"
+                  :loading="sharingBusy"
+                  @click="shareQuestionToTeacher(selectedHistory.id)"
+                >
+                  提交给老师
+                </a-button>
+                <a-button
+                  v-else-if="!selectedHistory.authoritative_answer"
+                  size="small"
+                  :loading="sharingBusy"
+                  @click="withdrawQuestionFromTeacher(selectedHistory.id)"
+                >
+                  撤回
+                </a-button>
+                <a-tag v-else color="green">老师已回复</a-tag>
+              </div>
             </a-card>
           </transition>
         </a-col>
@@ -340,7 +406,7 @@ import { marked } from 'marked'
 import katex from 'katex'
 import 'katex/dist/katex.min.css'
 import { message as toast } from 'ant-design-vue'
-import { CopyOutlined, DeleteOutlined, MenuOutlined, PlusOutlined, UploadOutlined } from '@ant-design/icons-vue'
+import { CopyOutlined, DeleteOutlined, LockOutlined, MenuOutlined, PlusOutlined, SafetyCertificateOutlined, UploadOutlined } from '@ant-design/icons-vue'
 import AnswerCards from '../components/cards/AnswerCards.vue'
 import ToolTrace from '../components/ToolTrace.vue'
 import CitationChips from '../components/cards/CitationChips.vue'
@@ -403,6 +469,10 @@ export default {
     const selectedHistoryId = ref(null)
     const titleRequested = new Set()
 
+    // 隐私边界：问答默认私密，只有学生主动提交后老师才能看到
+    const currentQuestionId = ref(null)
+    const sharingBusy = ref(false)
+
     const demoPlugins = [
       {
         glyph: '笔',
@@ -445,6 +515,12 @@ export default {
     const chapterTitles = computed(() =>
       Object.fromEntries((agentMeta.value.chapters || []).map((chapter) => [chapter.id, chapter.title]))
     )
+
+    const currentHistoryRecord = computed(
+      () => history.value.find((item) => item.id === currentQuestionId.value) || null
+    )
+    const currentQuestionShared = computed(() => Boolean(currentHistoryRecord.value?.shared))
+    const currentQuestionAnswered = computed(() => Boolean(currentHistoryRecord.value?.authoritative_answer))
 
     // 把网络突发到达的 token 平滑打印出来，避免“等几秒后整段出现”
     const typewriter = createTypewriter((chunk) => {
@@ -633,6 +709,7 @@ export default {
 
     const resetAgentState = () => {
       typewriter.reset()
+      currentQuestionId.value = null
       agentUi.value = null
       agentSources.value = []
       agentTrace.value = []
@@ -670,6 +747,9 @@ export default {
             break
           case 'complete':
             completedEvent = event
+            break
+          case 'done':
+            if (event.messageId) currentQuestionId.value = event.messageId
             break
           case 'error':
             serverError = event.message || 'AI 服务暂时不可用'
@@ -833,6 +913,9 @@ export default {
             answer: item.answer,
             timestamp: item.timestamp,
             mode: item.mode || 'fast',
+            authoritative_answer: item.authoritative_answer || '',
+            shared: Boolean(item.shared),
+            shared_at: item.shared_at || null,
             ui: validated,
             trace
           }
@@ -947,6 +1030,36 @@ export default {
       }
     }
 
+    const shareQuestionToTeacher = async (questionId) => {
+      if (!questionId || sharingBusy.value) return
+      sharingBusy.value = true
+      try {
+        const response = await axios.post(`/api/questions/${questionId}/share`)
+        toast.success(response.data?.message || '已提交给老师')
+        await fetchQuestionHistory()
+      } catch (error) {
+        console.error('提交给老师失败:', error)
+        toast.error(error.response?.data?.error || '提交失败，请稍后重试')
+      } finally {
+        sharingBusy.value = false
+      }
+    }
+
+    const withdrawQuestionFromTeacher = async (questionId) => {
+      if (!questionId || sharingBusy.value) return
+      sharingBusy.value = true
+      try {
+        const response = await axios.delete(`/api/questions/${questionId}/share`)
+        toast.success(response.data?.message || '已撤回')
+        await fetchQuestionHistory()
+      } catch (error) {
+        console.error('撤回失败:', error)
+        toast.error(error.response?.data?.error || '撤回失败，请稍后重试')
+      } finally {
+        sharingBusy.value = false
+      }
+    }
+
     const deleteQuestionRecord = async (item) => {
       if (!item.id) return
 
@@ -1045,7 +1158,13 @@ export default {
       currentMode,
       agentMeta,
       chapterTitles,
-      askFollowUp
+      askFollowUp,
+      currentQuestionId,
+      currentQuestionShared,
+      currentQuestionAnswered,
+      sharingBusy,
+      shareQuestionToTeacher,
+      withdrawQuestionFromTeacher
     }
   }
 }
@@ -1735,5 +1854,46 @@ export default {
   .sidebar-toggle {
     top: 84px;
   }
+}
+.privacy-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin-top: 18px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.privacy-bar-detail {
+  margin-top: 16px;
+}
+
+.privacy-copy {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 1.7;
+  color: rgba(255, 255, 255, 0.55);
+}
+
+.privacy-copy strong {
+  color: rgba(255, 255, 255, 0.85);
+  font-weight: 600;
+}
+
+.privacy-icon {
+  flex: none;
+  margin-top: 3px;
+  color: rgba(255, 200, 120, 0.85);
+}
+
+.privacy-icon.is-accepted {
+  color: rgba(140, 220, 160, 0.9);
 }
 </style>

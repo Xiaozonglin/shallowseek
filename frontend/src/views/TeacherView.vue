@@ -22,25 +22,29 @@
         <a-col :xs="24" :xl="16">
           <div class="stats-grid">
             <a-card class="surface-card stat-tile">
-              <span>总提问数</span>
+              <span>已提交提问数</span>
               <strong>{{ stats.total_questions || 0 }}</strong>
             </a-card>
             <a-card class="surface-card stat-tile">
-              <span>活跃学生数</span>
+              <span>参与学生数</span>
               <strong>{{ Object.keys(stats.questions_by_student || {}).length }}</strong>
             </a-card>
           </div>
+
+          <p class="teacher-privacy-hint">
+            统计、学情与待处理列表只包含学生主动提交的问答；默认私密问答不会出现在这里。
+          </p>
 
           <a-card v-if="stats.summary" class="surface-card teacher-card" title="AI 学情分析">
             <div class="summary-content markdown-body" v-html="renderMarkdown(stats.summary)"></div>
           </a-card>
 
-          <a-card class="surface-card teacher-card" title="待处理权威答案">
+          <a-card class="surface-card teacher-card" title="学生提交的提问">
             <template #extra>
               <a-button type="primary" size="small" @click="fetchPendingQuestions">刷新</a-button>
             </template>
 
-            <a-empty v-if="pendingQuestions.length === 0" description="当前没有待处理问题" />
+            <a-empty v-if="pendingQuestions.length === 0" description="当前没有学生提交的提问" />
 
             <a-collapse v-else v-model:activeKey="activeQuestionKeys" accordion>
               <a-collapse-panel
@@ -722,5 +726,15 @@ export default {
   .question-entry {
     grid-template-columns: 1fr;
   }
+}
+.teacher-privacy-hint {
+  margin: 0 0 14px;
+  padding: 10px 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(120, 190, 255, 0.18);
+  background: rgba(120, 190, 255, 0.06);
+  font-size: 12px;
+  line-height: 1.7;
+  color: rgba(255, 255, 255, 0.55);
 }
 </style>

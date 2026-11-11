@@ -50,6 +50,7 @@
             />
             <template v-else>
               <span class="history-title" :title="displayTitle(item)">{{ displayTitle(item) }}</span>
+              <span v-if="item.shared" class="history-shared">已提交</span>
               <span class="history-actions">
                 <button
                   type="button"
@@ -478,5 +479,15 @@ const commitRename = () => {
     top: 72px;
     width: min(300px, 86vw);
   }
+}
+.history-shared {
+  flex: none;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  line-height: 1.6;
+  color: rgba(140, 220, 160, 0.9);
+  border: 1px solid rgba(140, 220, 160, 0.35);
+  background: rgba(140, 220, 160, 0.08);
 }
 </style>
