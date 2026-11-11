@@ -8,7 +8,7 @@
 
 from __future__ import annotations
 
-from . import ui_cards
+from . import answer_modes, ui_cards
 
 FALLBACK_ANSWER = "抱歉，刚才没能完成这次回答，请重试或换一种问法。"
 
@@ -18,8 +18,13 @@ _IDENTITY = (
 )
 
 
-def deep_system_prompt(ui_enabled: bool = True, authoritative_context: str = "") -> str:
-    """构造深度模式 system prompt；教师权威答案、章节目录与卡片规则动态拼接。"""
+def deep_system_prompt(
+    ui_enabled: bool = True,
+    authoritative_context: str = "",
+    template: str = "",
+    style: str = "",
+) -> str:
+    """构造深度模式 system prompt；教师权威答案、回答效果、章节目录与卡片规则动态拼接。"""
     catalog_lines = "\n".join(
         f"- {chapter_id}：{title}" for chapter_id, title in ui_cards.chapter_titles().items()
     )
@@ -33,6 +38,8 @@ def deep_system_prompt(ui_enabled: bool = True, authoritative_context: str = "")
             "要求：若与本地资料或你自己的知识冲突，以教师答案为准；"
             "回答时说明这是老师的权威解答，不要改写成你自己的推断。"
         )
+
+    mode_block = "\n\n" + answer_modes.mode_instructions(template, style)
 
     tool_rules = (
         "\n\n【可用工具】\n"
@@ -65,4 +72,4 @@ def deep_system_prompt(ui_enabled: bool = True, authoritative_context: str = "")
         "不要声称执行了未提供的操作，也不要编造引用编号或资料内容。"
     )
 
-    return _IDENTITY + authority_block + tool_rules + card_rules + final_rules
+    return _IDENTITY + authority_block + mode_block + tool_rules + card_rules + final_rules

@@ -9,7 +9,7 @@ import os
 import tempfile
 import unittest
 
-_DB_FILE = os.path.join(tempfile.gettempdir(), "xdwe-api-offline.db")
+_DB_FILE = os.path.join(tempfile.gettempdir(), "xdwe-tests.db")
 os.environ.setdefault("DEEPSEEK_API_KEY", "sk-test")
 os.environ.setdefault("DATABASE_URL", f"sqlite:///{_DB_FILE}")
 
@@ -29,14 +29,16 @@ def _events(raw_chunks):
 class QaEventStreamTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        if os.path.exists(_DB_FILE):
-            os.unlink(_DB_FILE)
         main.app.config["TESTING"] = True
         with main.app.app_context():
             main.db.create_all()
-            student = main.User(username="tester", email="tester@example.com", password="x", role="student")
-            main.db.session.add(student)
-            main.db.session.commit()
+            student = main.User.query.filter_by(username="tester").first()
+            if student is None:
+                student = main.User(
+                    username="tester", email="tester@example.com", password="x", role="student"
+                )
+                main.db.session.add(student)
+                main.db.session.commit()
             cls.student_id = student.id
 
     def setUp(self):
@@ -77,7 +79,7 @@ class QaEventStreamTest(unittest.TestCase):
             "cards": [{"type": "source_list", "citations": [1]}],
         }
 
-        def fake_agent_run(question, history_text="", ui_enabled=True):
+        def fake_agent_run(question, history_text="", ui_enabled=True, **kwargs):
             yield {"type": "status", "stage": "thinking", "message": "正在检索…"}
             yield {"type": "answer_delta", "text": "二分查找要求数组有序。"}
             yield {"type": "ui", "ui": ui_payload}
@@ -134,7 +136,7 @@ class QaEventStreamTest(unittest.TestCase):
     def test_typed_deep_stream_with_file(self):
         captured = {}
 
-        def fake_agent_run(question, history_text="", ui_enabled=True):
+        def fake_agent_run(question, history_text="", ui_enabled=True, **kwargs):
             captured["question"] = question
             yield {"type": "answer_delta", "text": "已阅读文件。"}
             yield {
@@ -225,7 +227,7 @@ class QaEventStreamTest(unittest.TestCase):
         self.assertIn('"type": "complete"', body)
 
     def test_deep_error_not_saved(self):
-        def failing_agent_run(question, history_text="", ui_enabled=True):
+        def failing_agent_run(question, history_text="", ui_enabled=True, **kwargs):
             yield {"type": "error", "code": "ai_error", "message": "模型不可用"}
 
         main.agent_runtime.run = failing_agent_run

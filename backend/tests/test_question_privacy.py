@@ -8,7 +8,7 @@ import uuid
 os.environ.setdefault("DEEPSEEK_API_KEY", "sk-test")
 os.environ.setdefault(
     "DATABASE_URL",
-    f"sqlite:///{os.path.join(tempfile.gettempdir(), 'xdwe-privacy-test.db')}",
+    f"sqlite:///{os.path.join(tempfile.gettempdir(), 'xdwe-tests.db')}",
 )
 
 import main  # noqa: E402  (需要先设置环境变量)

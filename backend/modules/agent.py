@@ -17,7 +17,7 @@ import os
 import time
 from typing import Any, Dict, Iterable, Iterator, List, Optional
 
-from . import agent_prompts, ui_cards
+from . import agent_prompts, answer_modes, ui_cards
 from .agent_tools import AgentTools
 
 logger = logging.getLogger(__name__)
@@ -72,17 +72,24 @@ class AgentRuntime:
         ui_enabled: bool = True,
         tools: Optional[AgentTools] = None,
         authoritative_context: str = "",
+        template: Optional[str] = None,
+        style: Optional[str] = None,
     ) -> Iterator[Dict[str, Any]]:
         started = time.monotonic()
         tools = tools or AgentTools(self.engine, ui_enabled=ui_enabled)
         trace: List[Dict[str, Any]] = []
         tools_schema = tools.schemas()
-        messages = self._initial_messages(question, history_text, ui_enabled, authoritative_context)
+        messages = self._initial_messages(question, history_text, ui_enabled, authoritative_context, template, style)
 
         final_text = ""
         timed_out = False
 
         yield {"type": "status", "stage": "thinking", "message": "正在检索和思考…"}
+
+        # 逐轮短对话：限制单次输出长度，引导模型只推进一小步
+        max_tokens = self.max_output_tokens
+        if answer_modes.normalize_style(style) == "short_round":
+            max_tokens = min(max_tokens, 900)
 
         for round_index in range(self.max_rounds):
             if time.monotonic() - started > self.timeout_seconds:
@@ -92,7 +99,7 @@ class AgentRuntime:
             round_text = ""
             pending_calls: Dict[int, Dict[str, Any]] = {}
             try:
-                stream = self._create_stream(messages, tools_schema)
+                stream = self._create_stream(messages, tools_schema, max_tokens)
                 for chunk in stream:
                     if time.monotonic() - started > self.timeout_seconds:
                         timed_out = True
@@ -192,6 +199,8 @@ class AgentRuntime:
         history_text: str,
         ui_enabled: bool,
         authoritative_context: str = "",
+        template: Optional[str] = None,
+        style: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         user_content = question
         if history_text:
@@ -202,18 +211,25 @@ class AgentRuntime:
                 "content": agent_prompts.deep_system_prompt(
                     ui_enabled=ui_enabled,
                     authoritative_context=authoritative_context,
+                    template=template,
+                    style=style,
                 ),
             },
             {"role": "user", "content": user_content},
         ]
 
-    def _create_stream(self, messages: List[Dict[str, Any]], tools_schema: List[Dict[str, Any]]):
+    def _create_stream(
+        self,
+        messages: List[Dict[str, Any]],
+        tools_schema: List[Dict[str, Any]],
+        max_tokens: Optional[int] = None,
+    ):
         kwargs: Dict[str, Any] = {
             "model": self.engine.model,
             "messages": messages,
             "stream": True,
             "temperature": 0.3,
-            "max_tokens": self.max_output_tokens,
+            "max_tokens": max_tokens or self.max_output_tokens,
         }
         if tools_schema:
             kwargs["tools"] = tools_schema
