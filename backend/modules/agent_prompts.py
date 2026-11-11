@@ -18,11 +18,21 @@ _IDENTITY = (
 )
 
 
-def deep_system_prompt(ui_enabled: bool = True) -> str:
-    """构造深度模式 system prompt；章节目录与卡片规则按是否启用卡片动态拼接。"""
+def deep_system_prompt(ui_enabled: bool = True, authoritative_context: str = "") -> str:
+    """构造深度模式 system prompt；教师权威答案、章节目录与卡片规则动态拼接。"""
     catalog_lines = "\n".join(
         f"- {chapter_id}：{title}" for chapter_id, title in ui_cards.chapter_titles().items()
     )
+
+    authority_block = ""
+    if authoritative_context and authoritative_context.strip():
+        authority_block = (
+            "\n\n【教师权威答案（最高优先级）】\n"
+            "以下内容由教师在平台上确认，是本轮回答的最高优先级依据：\n"
+            f"{authoritative_context.strip()}\n"
+            "要求：若与本地资料或你自己的知识冲突，以教师答案为准；"
+            "回答时说明这是老师的权威解答，不要改写成你自己的推断。"
+        )
 
     tool_rules = (
         "\n\n【可用工具】\n"
@@ -55,4 +65,4 @@ def deep_system_prompt(ui_enabled: bool = True) -> str:
         "不要声称执行了未提供的操作，也不要编造引用编号或资料内容。"
     )
 
-    return _IDENTITY + tool_rules + card_rules + final_rules
+    return _IDENTITY + authority_block + tool_rules + card_rules + final_rules

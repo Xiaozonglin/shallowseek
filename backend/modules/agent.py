@@ -71,12 +71,13 @@ class AgentRuntime:
         history_text: str = "",
         ui_enabled: bool = True,
         tools: Optional[AgentTools] = None,
+        authoritative_context: str = "",
     ) -> Iterator[Dict[str, Any]]:
         started = time.monotonic()
         tools = tools or AgentTools(self.engine, ui_enabled=ui_enabled)
         trace: List[Dict[str, Any]] = []
         tools_schema = tools.schemas()
-        messages = self._initial_messages(question, history_text, ui_enabled)
+        messages = self._initial_messages(question, history_text, ui_enabled, authoritative_context)
 
         final_text = ""
         timed_out = False
@@ -185,12 +186,24 @@ class AgentRuntime:
         }
 
     # ========================== 内部辅助 ==========================
-    def _initial_messages(self, question: str, history_text: str, ui_enabled: bool) -> List[Dict[str, Any]]:
+    def _initial_messages(
+        self,
+        question: str,
+        history_text: str,
+        ui_enabled: bool,
+        authoritative_context: str = "",
+    ) -> List[Dict[str, Any]]:
         user_content = question
         if history_text:
             user_content = f"{question}\n\n【最近的问答记录，仅供参考】\n{history_text}"
         return [
-            {"role": "system", "content": agent_prompts.deep_system_prompt(ui_enabled=ui_enabled)},
+            {
+                "role": "system",
+                "content": agent_prompts.deep_system_prompt(
+                    ui_enabled=ui_enabled,
+                    authoritative_context=authoritative_context,
+                ),
+            },
             {"role": "user", "content": user_content},
         ]
 
