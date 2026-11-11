@@ -103,6 +103,9 @@ class Question(db.Model):
     trace_json = db.Column(db.Text, nullable=True)
     mode = db.Column(db.String(10), default='fast')
     title = db.Column(db.String(120), nullable=True)  # 侧边栏历史标题（LLM 生成，可由学生修改）
+    # 隐私边界：问答默认仅学生本人可见，只有学生主动提交后教师端才能查看/回答
+    shared = db.Column(db.Boolean, nullable=False, default=False)
+    shared_at = db.Column(db.DateTime, nullable=True)
 
 
 class Message(db.Model):
@@ -299,9 +302,68 @@ def get_student_question_history():
             "mode": q.mode or "fast",
             "ui": _load(q.ui_json),
             "trace": _load(q.trace_json),
+            "shared": bool(q.shared),
+            "shared_at": q.shared_at.isoformat() if q.shared_at else None,
         }
         for q in questions
     ]), 200
+
+
+@app.route("/api/questions/<int:q_id>/share", methods=["POST"])
+@login_required
+@rate_limit(limit=30)
+def share_question_to_teacher(q_id):
+    """学生主动把某次问答提交给老师（默认私密，提交后才进入教师端）。"""
+    if current_user.role != 'student':
+        return flask.jsonify({"error": "权限不足"}), 403
+    question = db.session.get(Question, q_id)
+    if not question:
+        return flask.jsonify({"error": "问题不存在"}), 404
+    if question.student_id != current_user.id:
+        return flask.jsonify({"error": "权限不足"}), 403
+
+    if not question.shared:
+        question.shared = True
+        question.shared_at = datetime.utcnow()
+        student = db.session.get(User, current_user.id)
+        if student:
+            # 学情分析只基于学生提交的内容，提交后需要重新生成
+            student.learning_summary = None
+            student.summary_updated_at = None
+        db.session.commit()
+
+    return flask.jsonify({
+        "shared": True,
+        "shared_at": question.shared_at.isoformat() if question.shared_at else None,
+        "message": "已提交给老师，老师可在教师端查看并回复",
+    }), 200
+
+
+@app.route("/api/questions/<int:q_id>/share", methods=["DELETE"])
+@login_required
+@rate_limit(limit=30)
+def withdraw_question_from_teacher(q_id):
+    """学生撤回提交；老师已回复的问答保留在课程记录中，不允许撤回。"""
+    if current_user.role != 'student':
+        return flask.jsonify({"error": "权限不足"}), 403
+    question = db.session.get(Question, q_id)
+    if not question:
+        return flask.jsonify({"error": "问题不存在"}), 404
+    if question.student_id != current_user.id:
+        return flask.jsonify({"error": "权限不足"}), 403
+    if question.authoritative_answer:
+        return flask.jsonify({"error": "老师已回复，该问答已保留在课程记录中，无法撤回"}), 409
+
+    if question.shared:
+        question.shared = False
+        question.shared_at = None
+        student = db.session.get(User, current_user.id)
+        if student:
+            student.learning_summary = None
+            student.summary_updated_at = None
+        db.session.commit()
+
+    return flask.jsonify({"shared": False, "message": "已撤回，老师将不再看到这条问答"}), 200
 
 
 @app.route("/api/agent/meta", methods=["GET"])
@@ -640,8 +702,8 @@ def get_question_stats():
     if current_user.role != 'teacher':
         return flask.jsonify({"error": "Permission denied"}), 403
     
-    # 1. 获取所有问题并按学生分组
-    questions = Question.query.order_by(Question.timestamp.desc()).all()
+    # 1. 只统计学生主动提交给老师的问答（默认私密的问答不进入学情分析）
+    questions = Question.query.filter(Question.shared.is_(True)).order_by(Question.timestamp.desc()).all()
     total_questions = len(questions)
     
     questions_by_student = {}
@@ -751,8 +813,20 @@ def reply_message(msg_id):
 @login_required
 def get_pending_questions():
     if current_user.role != 'teacher': return flask.jsonify({"error": "权限不足"}), 403
-    questions = Question.query.order_by(Question.timestamp.desc()).all()
-    return flask.jsonify([{"id": q.id, "content": q.content, "ai_answer": q.answer, "authoritative_answer": q.authoritative_answer, "student_id": q.student_id, "student_name": db.session.get(User, q.student_id).username if db.session.get(User, q.student_id) else "未知", "timestamp": q.timestamp.isoformat()} for q in questions]), 200
+    questions = Question.query.filter(Question.shared.is_(True)).order_by(Question.timestamp.desc()).all()
+    return flask.jsonify([
+        {
+            "id": q.id,
+            "content": q.content,
+            "ai_answer": q.answer,
+            "authoritative_answer": q.authoritative_answer,
+            "student_id": q.student_id,
+            "student_name": db.session.get(User, q.student_id).username if db.session.get(User, q.student_id) else "未知",
+            "timestamp": q.timestamp.isoformat(),
+            "shared_at": q.shared_at.isoformat() if q.shared_at else None,
+        }
+        for q in questions
+    ]), 200
 
 @app.route("/api/questions/<int:q_id>/authoritative", methods=["POST"])
 @login_required
@@ -761,6 +835,8 @@ def submit_authoritative_answer(q_id):
     answer = sanitize_input(flask.request.json.get('answer'))
     question = db.session.get(Question, q_id)
     if not question: return flask.jsonify({"error": "问题不存在"}), 404
+    if not question.shared:
+        return flask.jsonify({"error": "该提问未提交给老师，教师端无权查看或回答"}), 403
     question.authoritative_answer = answer
     question.teacher_id = current_user.id
     db.session.commit()
@@ -775,6 +851,8 @@ def delete_question(q_id):
 
     if current_user.role != 'teacher' and q.student_id != current_user.id:
         return flask.jsonify({"error": "权限不足"}), 403
+    if current_user.role == 'teacher' and not q.shared:
+        return flask.jsonify({"error": "该提问未提交给老师，教师端无权删除"}), 403
 
     student = db.session.get(User, q.student_id)
     db.session.delete(q)
@@ -849,11 +927,22 @@ def ensure_schema():
         if "question" not in inspector.get_table_names():
             return
         columns = {column["name"] for column in inspector.get_columns("question")}
-        additions = {"ui_json": "TEXT", "trace_json": "TEXT", "mode": "VARCHAR(10)", "title": "VARCHAR(120)"}
+        additions = {
+            "ui_json": "TEXT",
+            "trace_json": "TEXT",
+            "mode": "VARCHAR(10)",
+            "title": "VARCHAR(120)",
+            "shared": "BOOLEAN DEFAULT 0",
+            "shared_at": "DATETIME",
+        }
+        first_privacy_migration = "shared" not in columns
         with db.engine.begin() as connection:
             for name, ddl in additions.items():
                 if name not in columns:
                     connection.execute(sql_text(f"ALTER TABLE question ADD COLUMN {name} {ddl}"))
+            if first_privacy_migration:
+                # 旧缓存可能包含学生未同意的问答，隐私边界上线时统一作废
+                connection.execute(sql_text("UPDATE user SET learning_summary = NULL, summary_updated_at = NULL"))
 
 
 if __name__ == "__main__":

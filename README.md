@@ -21,6 +21,7 @@
 - 后端：Flask 框架提供 API 接口，Flask-Login 管理会话认证，SQLAlchemy 操作 SQLite 数据库；
 - AI 服务：调用 **DeepSeek API**（`deepseek-flash`，OpenAI 兼容协议，支持文本与图片理解、SSE 流式输出），**不加载任何本地大模型**，无需 GPU 与模型权重；
 - 知识检索：jieba 分词 + BM25 词法检索，索引由 `backend/build_index.py` 在本地生成（演示场景可跳过，跳过时自动关闭检索）；
+- **隐私边界**：学生与 AI 的问答默认**仅自己可见**，不会自动同步给教师；需要老师帮助时，学生在回答下方点「提交给老师」，教师端才会看到该条问答（老师回复前可撤回）。学情分析与待处理列表也只基于学生主动提交的内容。
 - **Agent / 智能 UI**：深度模式在进程内跑 DeepSeek function-calling 工具循环（检索、读原文、计算、提交卡片），以 SSE 事件流输出过程与卡片；前端渲染「参考资料 / 解题步骤 / 相关章节」三类卡片。设计决策见 `migration/ADR-001-agent-ui-architecture.md`，演示题库见 `migration/DEMO_QA.md`。
 
 > 与旧版本的差异：已移除本地 Qwen3-VL / BGE / FAISS / PyTorch 方案，图片问答改由 DeepSeek 视觉能力完成，并吸收了 xdu-zhixing 的 Agent / 卡片化回答思路，详情见 `migration/MIGRATION_REVIEW.md` 与 `migration/AGENT_UI_MIGRATION_PLAN.md`。
