@@ -92,7 +92,7 @@ class AuthorityStreamTest(unittest.TestCase):
     def setUpClass(cls):
         main.app.config["TESTING"] = True
         with main.app.app_context():
-            main.db.create_all()
+            main.ensure_schema()
             student = main.User.query.filter_by(username="authority_probe").first()
             if student is None:
                 student = main.User(
