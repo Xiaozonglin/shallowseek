@@ -111,6 +111,17 @@ class Question(db.Model):
     # 回答效果：模板（学习新知/复习旧知/探索未知）× 交流方式（逐轮短对话/长对话）
     template = db.Column(db.String(20), default=answer_modes.DEFAULT_TEMPLATE)
     style = db.Column(db.String(20), default=answer_modes.DEFAULT_STYLE)
+    # 共性问题合并：同一组问题共享老师的一次合并回复
+    group_id = db.Column(db.Integer, db.ForeignKey('question_group.id'), nullable=True)
+
+
+class QuestionGroup(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    teacher_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=True)
+    title = db.Column(db.String(120), nullable=False, default='')
+    question_text = db.Column(db.String(500), nullable=False, default='')
+    answer = db.Column(db.Text, nullable=True)  # 一次回复，组内学生都能看到
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
 
 class Message(db.Model):
@@ -164,22 +175,67 @@ def _generate_question_title(question, answer=""):
 
 
 def get_authoritative_context(query):
-    """在教师权威答案中找与当前提问最接近的一条（词法相似度）。"""
-    questions = Question.query.filter(Question.authoritative_answer.isnot(None)).all()
-    if not questions:
-        return ""
+    """在教师权威答案 / 合并共性问题中找与当前提问最接近的一条（词法相似度）。"""
+    best_answer = ""
+    best_teacher_id = None
+    best_title = ""
+    best_kind = "single"
+    best_sim = AUTHORITATIVE_SIM_THRESHOLD
 
-    best_match, best_sim = None, AUTHORITATIVE_SIM_THRESHOLD
-    for question in questions:
+    for question in Question.query.filter(Question.authoritative_answer.isnot(None)).all():
         sim = ai.text_similarity(query, question.content)
         if sim > best_sim:
-            best_sim, best_match = sim, question
+            best_sim = sim
+            best_answer = question.authoritative_answer
+            best_teacher_id = question.teacher_id
+            best_kind = "single"
+            best_title = ""
 
-    if best_match:
-        teacher = db.session.get(User, best_match.teacher_id)
-        teacher_name = teacher.username if teacher else "老师"
-        return f"\n【历史权威参考】来自{teacher_name}的解答：\n{best_match.authoritative_answer}\n"
-    return ""
+    # 合并后的共性问题：用代表问题 + 组内问题文本取最大相似度
+    for group in QuestionGroup.query.filter(QuestionGroup.answer.isnot(None)).all():
+        texts = [group.question_text]
+        texts.extend(
+            item.content for item in Question.query.filter_by(group_id=group.id).limit(8).all()
+        )
+        sim = max((ai.text_similarity(query, item) for item in texts if item), default=0.0)
+        if sim > best_sim:
+            best_sim = sim
+            best_answer = group.answer
+            best_teacher_id = group.teacher_id
+            best_title = group.title
+            best_kind = "group"
+
+    if not best_answer:
+        return ""
+
+    teacher = db.session.get(User, best_teacher_id) if best_teacher_id else None
+    teacher_name = teacher.username if teacher else "老师"
+    if best_kind == "group":
+        return (
+            f"\n【同类问题合并参考】来自{teacher_name}的解答"
+            f"（{best_title or '共性问题'}）：\n{best_answer}\n"
+        )
+    return f"\n【历史权威参考】来自{teacher_name}的解答：\n{best_answer}\n"
+
+
+def _effective_authoritative_answer(question):
+    """学生历史里看到的老师回复：个人权威答案优先，其次合并组回复。"""
+    if question.authoritative_answer:
+        return question.authoritative_answer
+    if question.group_id:
+        group = db.session.get(QuestionGroup, question.group_id)
+        if group and group.answer:
+            return group.answer
+    return None
+
+
+def _merged_group_info(question):
+    if not question.group_id:
+        return None
+    group = db.session.get(QuestionGroup, question.group_id)
+    if not group:
+        return None
+    return {"id": group.id, "title": group.title}
 
 
 def truncate_for_prompt(text, max_chars=220):
@@ -302,7 +358,8 @@ def get_student_question_history():
             "question": q.content,
             "title": q.title or "",
             "answer": q.answer,
-            "authoritative_answer": q.authoritative_answer,
+            "authoritative_answer": _effective_authoritative_answer(q),
+            "merged_group": _merged_group_info(q),
             "timestamp": q.timestamp.isoformat(),
             "mode": q.mode or "fast",
             "ui": _load(q.ui_json),
@@ -861,7 +918,7 @@ def reply_message(msg_id):
 @login_required
 def get_pending_questions():
     if current_user.role != 'teacher': return flask.jsonify({"error": "权限不足"}), 403
-    questions = Question.query.filter(Question.shared.is_(True)).order_by(Question.timestamp.desc()).all()
+    questions = Question.query.filter(Question.shared.is_(True), Question.group_id.is_(None)).order_by(Question.timestamp.desc()).all()
     return flask.jsonify([
         {
             "id": q.id,
@@ -885,6 +942,8 @@ def submit_authoritative_answer(q_id):
     if not question: return flask.jsonify({"error": "问题不存在"}), 404
     if not question.shared:
         return flask.jsonify({"error": "该提问未提交给老师，教师端无权查看或回答"}), 403
+    if question.group_id:
+        return flask.jsonify({"error": "该提问已合并为共性问题，请编辑合并回复"}), 409
     question.authoritative_answer = answer
     question.teacher_id = current_user.id
     db.session.commit()
@@ -903,11 +962,19 @@ def delete_question(q_id):
         return flask.jsonify({"error": "该提问未提交给老师，教师端无权删除"}), 403
 
     student = db.session.get(User, q.student_id)
+    group_id = q.group_id
     db.session.delete(q)
     if student:
         student.learning_summary = None
         student.summary_updated_at = None
     db.session.commit()
+    if group_id:
+        remaining = Question.query.filter_by(group_id=group_id).count()
+        if remaining == 0:
+            group = db.session.get(QuestionGroup, group_id)
+            if group:
+                db.session.delete(group)
+                db.session.commit()
     return flask.jsonify({"message": "删除成功"}), 200
 
 
@@ -947,6 +1014,176 @@ def update_question_title(q_id):
     db.session.commit()
     return flask.jsonify({"title": q.title}), 200
 
+# ========================== 共性问题合并 ==========================
+def _group_payload(group, include_questions=True):
+    members = (
+        Question.query.filter_by(group_id=group.id).order_by(Question.timestamp.asc()).all()
+    )
+    payload = {
+        "id": group.id,
+        "title": group.title,
+        "question_text": group.question_text,
+        "answer": group.answer,
+        "created_at": group.created_at.isoformat() if group.created_at else None,
+        "question_ids": [item.id for item in members],
+        "member_count": len(members),
+    }
+    if include_questions:
+        payload["questions"] = [
+            {
+                "id": item.id,
+                "content": item.content,
+                "student_name": (
+                    db.session.get(User, item.student_id).username
+                    if db.session.get(User, item.student_id)
+                    else "未知"
+                ),
+                "timestamp": item.timestamp.isoformat(),
+            }
+            for item in members
+        ]
+    return payload
+
+
+@app.route("/api/questions/groups", methods=["GET"])
+@login_required
+def list_question_groups():
+    if current_user.role != "teacher":
+        return flask.jsonify({"error": "权限不足"}), 403
+    groups = QuestionGroup.query.order_by(QuestionGroup.created_at.desc()).all()
+    return flask.jsonify([_group_payload(group) for group in groups]), 200
+
+
+@app.route("/api/questions/groups/suggestions", methods=["GET"])
+@login_required
+def suggest_question_groups():
+    """把学生提交、尚未合并的问题按词法相似度聚成建议组。"""
+    if current_user.role != "teacher":
+        return flask.jsonify({"error": "权限不足"}), 403
+
+    threshold = float(os.getenv("GROUP_SIM_THRESHOLD", "0.45"))
+    questions = (
+        Question.query.filter(Question.shared.is_(True), Question.group_id.is_(None))
+        .order_by(Question.timestamp.desc())
+        .limit(80)
+        .all()
+    )
+    used = set()
+    suggestions = []
+    for index, question in enumerate(questions):
+        if question.id in used:
+            continue
+        members = [question]
+        similarities = []
+        for other in questions[index + 1 :]:
+            if other.id in used:
+                continue
+            similarity = ai.text_similarity(question.content, other.content)
+            if similarity >= threshold:
+                members.append(other)
+                similarities.append(similarity)
+        if len(members) < 2:
+            continue
+        used.update(item.id for item in members)
+        suggestions.append(
+            {
+                "suggestedTitle": (members[0].content or "共性问题")[:40],
+                "score": round(sum(similarities) / len(similarities), 3),
+                "questions": [
+                    {
+                        "id": item.id,
+                        "content": item.content,
+                        "student_name": (
+                            db.session.get(User, item.student_id).username
+                            if db.session.get(User, item.student_id)
+                            else "未知"
+                        ),
+                    }
+                    for item in members
+                ],
+            }
+        )
+
+    suggestions.sort(key=lambda item: (len(item["questions"]), item["score"]), reverse=True)
+    return flask.jsonify(suggestions[:5]), 200
+
+
+@app.route("/api/questions/groups", methods=["POST"])
+@login_required
+def create_question_group():
+    if current_user.role != "teacher":
+        return flask.jsonify({"error": "权限不足"}), 403
+
+    data = flask.request.get_json(silent=True) or {}
+    raw_ids = data.get("question_ids") or []
+    try:
+        question_ids = list(dict.fromkeys(int(item) for item in raw_ids))
+    except (TypeError, ValueError):
+        return flask.jsonify({"error": "问题 ID 不合法"}), 400
+    if len(question_ids) < 2:
+        return flask.jsonify({"error": "至少选择 2 条相似问题"}), 400
+
+    questions = Question.query.filter(Question.id.in_(question_ids)).all()
+    if len(questions) != len(question_ids):
+        return flask.jsonify({"error": "包含不存在的问题"}), 404
+    if any(not item.shared for item in questions):
+        return flask.jsonify({"error": "只能合并学生主动提交的问题"}), 403
+    if any(item.group_id for item in questions):
+        return flask.jsonify({"error": "其中部分问题已经合并，请先解除原合并"}), 409
+
+    title = sanitize_input(data.get("title") or "", max_length=120).strip()
+    if not title:
+        title = (questions[0].content or "共性问题")[:40]
+    answer = sanitize_input(data.get("answer") or "", max_length=4000).strip()
+
+    group = QuestionGroup(
+        teacher_id=current_user.id,
+        title=title,
+        question_text=questions[0].content,
+        answer=answer or None,
+    )
+    db.session.add(group)
+    db.session.flush()
+    for item in questions:
+        item.group_id = group.id
+    db.session.commit()
+    return flask.jsonify(_group_payload(group)), 201
+
+
+@app.route("/api/questions/groups/<int:group_id>", methods=["PUT"])
+@login_required
+def update_question_group(group_id):
+    if current_user.role != "teacher":
+        return flask.jsonify({"error": "权限不足"}), 403
+    group = db.session.get(QuestionGroup, group_id)
+    if not group:
+        return flask.jsonify({"error": "合并组不存在"}), 404
+
+    data = flask.request.get_json(silent=True) or {}
+    if "title" in data:
+        title = sanitize_input(data.get("title") or "", max_length=120).strip()
+        if title:
+            group.title = title
+    if "answer" in data:
+        group.answer = sanitize_input(data.get("answer") or "", max_length=4000).strip() or None
+    db.session.commit()
+    return flask.jsonify(_group_payload(group)), 200
+
+
+@app.route("/api/questions/groups/<int:group_id>", methods=["DELETE"])
+@login_required
+def delete_question_group(group_id):
+    if current_user.role != "teacher":
+        return flask.jsonify({"error": "权限不足"}), 403
+    group = db.session.get(QuestionGroup, group_id)
+    if not group:
+        return flask.jsonify({"error": "合并组不存在"}), 404
+    Question.query.filter_by(group_id=group.id).update({Question.group_id: None})
+    db.session.delete(group)
+    db.session.commit()
+    return flask.jsonify({"message": "已解除合并"}), 200
+
+
 # ========================== 安全响应头中间件 ==========================
 @app.after_request
 def add_security_headers(response):
@@ -984,6 +1221,7 @@ def ensure_schema():
             "shared_at": "DATETIME",
             "template": "VARCHAR(20)",
             "style": "VARCHAR(20)",
+            "group_id": "INTEGER",
         }
         first_privacy_migration = "shared" not in columns
         with db.engine.begin() as connection:
