@@ -23,6 +23,12 @@ const router = createRouter({
       meta: { requiresAuth: true, role: 'student' }
     },
     {
+      path: '/student/campus',
+      name: 'studentCampus',
+      component: () => import('../views/StudentCampusView.vue'),
+      meta: { requiresAuth: true, role: 'student' }
+    },
+    {
       path: '/teacher',
       name: 'teacher',
       component: () => import('../views/TeacherView.vue'),

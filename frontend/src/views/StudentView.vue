@@ -11,6 +11,7 @@
       @delete="deleteHistoryRecord"
       @open-plugins="openPlugins"
       @open-workspace="openWorkspace"
+      @open-campus="openCampus"
     />
 
     <transition name="soft-rise">
@@ -421,6 +422,7 @@
 
 <script>
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import axios from 'axios'
 import { marked } from 'marked'
 import katex from 'katex'
@@ -472,6 +474,7 @@ export default {
     AnswerStylePanel
   },
   setup() {
+    const router = useRouter()
     const question = ref('')
     const answer = ref('')
     const streamingAnswer = ref('')
@@ -1054,6 +1057,11 @@ export default {
       window.scrollTo({ top: 0, behavior: 'smooth' })
     }
 
+    const openCampus = () => {
+      sidebarOpen.value = false
+      router.push('/student/campus')
+    }
+
     const openPlugins = () => {
       activePanel.value = 'plugin'
       closeSidebar()
@@ -1213,6 +1221,7 @@ export default {
       startNewQuestion,
       openWorkspace,
       openPlugins,
+      openCampus,
       selectHistory,
       closeHistoryDetail,
       renameHistoryTitle,

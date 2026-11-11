@@ -17,6 +17,15 @@
         <message-outlined />
         <span>提问工作区</span>
       </button>
+      <button
+        type="button"
+        class="nav-item"
+        :class="{ active: panel === 'campus' }"
+        @click="$emit('open-campus')"
+      >
+        <calendar-outlined />
+        <span>校园信息</span>
+      </button>
     </nav>
 
     <div class="sidebar-scroll">
@@ -99,6 +108,7 @@
 import { nextTick, onMounted, ref } from 'vue'
 import {
   AppstoreOutlined,
+  CalendarOutlined,
   DeleteOutlined,
   DownOutlined,
   EditOutlined,
@@ -114,7 +124,7 @@ defineProps({
   open: { type: Boolean, default: false }
 })
 
-const emit = defineEmits(['new-question', 'open-workspace', 'open-plugins', 'select', 'rename', 'delete'])
+const emit = defineEmits(['new-question', 'open-workspace', 'open-plugins', 'open-campus', 'select', 'rename', 'delete'])
 
 const COLLAPSE_KEY = 'student-history-collapsed'
 const historyCollapsed = ref(false)
