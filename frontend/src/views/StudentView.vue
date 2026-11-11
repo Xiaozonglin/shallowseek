@@ -1,10 +1,71 @@
 <template>
   <div class="workspace-page">
-    <div class="container workspace-shell">
-      <section class="workspace-hero">
+    <student-sidebar
+      :history="history"
+      :active-id="selectedHistoryId"
+      :panel="activePanel"
+      :open="sidebarOpen"
+      @new-question="startNewQuestion"
+      @select="selectHistory"
+      @rename="renameHistoryTitle"
+      @delete="deleteHistoryRecord"
+      @open-plugins="openPlugins"
+      @open-workspace="openWorkspace"
+    />
+
+    <transition name="soft-rise">
+      <div v-if="sidebarOpen" class="sidebar-backdrop" @click="sidebarOpen = false"></div>
+    </transition>
+
+    <button class="sidebar-toggle" type="button" aria-label="打开侧边栏" @click="sidebarOpen = !sidebarOpen">
+      <menu-outlined />
+    </button>
+
+    <div class="workspace-main">
+      <div class="container workspace-shell">
+        <section v-if="activePanel === 'plugin'" class="plugin-page">
+          <header class="plugin-hero">
+            <div>
+              <div class="workspace-eyebrow">Student Plugins</div>
+              <h1>学生插件</h1>
+              <p>把学生自己开发的工具、知识库与 Agent 助手接入学习工作区。</p>
+            </div>
+            <a-button type="primary" @click="showPluginHint">
+              <template #icon><plus-outlined /></template>
+              添加插件
+            </a-button>
+          </header>
+
+          <div class="plugin-grid">
+            <a-card v-for="plugin in demoPlugins" :key="plugin.name" class="surface-card plugin-card">
+              <div class="plugin-card-head">
+                <span class="plugin-glyph">{{ plugin.glyph }}</span>
+              </div>
+              <h3>{{ plugin.name }}</h3>
+              <p>{{ plugin.description }}</p>
+              <div class="plugin-card-foot">
+                <a-button
+                  size="small"
+                  :type="plugin.installed ? 'default' : 'primary'"
+                  :disabled="plugin.installed"
+                  @click="showPluginHint"
+                >
+                  {{ plugin.installed ? '已添加' : '添加' }}
+                </a-button>
+              </div>
+            </a-card>
+
+            <button type="button" class="plugin-add-card" @click="showPluginHint">
+              <plus-outlined />
+              <span>添加学生插件</span>
+            </button>
+          </div>
+        </section>
+
+        <section v-if="activePanel === 'workspace'" class="workspace-hero">
         <div>
           <div class="workspace-eyebrow">Student Workspace</div>
-          <h1>专注提问、阅读答案、与老师协作。</h1>
+          <h1>What should we work on?</h1>
           <p>
             让 AI 问答、图像理解与留言记录在同一屏内自然流动。
           </p>
@@ -21,7 +82,7 @@
         </div>
       </section>
 
-      <a-row :gutter="[24, 24]">
+      <a-row v-if="activePanel === 'workspace'" :gutter="[24, 24]">
         <a-col :xs="24" :xl="16">
           <a-card class="surface-card panel-card composer-card" title="智能提问">
             <a-form layout="vertical">
@@ -38,30 +99,37 @@
               <a-form-item label="输入问题">
                 <a-textarea
                   v-model:value="question"
-                  placeholder="输入你想问的问题，或上传一张图片让系统一起分析。"
+                  placeholder="输入你想问的问题，或上传图片 / 文件让系统一起分析。"
                   :rows="5"
                 />
               </a-form-item>
 
-              <a-form-item label="图像输入（可选）">
+              <a-form-item label="文件输入（可选）">
                 <div class="upload-row">
                   <a-upload
-                    :before-upload="handleImageUpload"
+                    :before-upload="handleFileUpload"
                     :show-upload-list="false"
-                    accept=".png,.jpg,.jpeg,.gif,.bmp"
+                    accept=".png,.jpg,.jpeg,.gif,.bmp,.webp,.txt,.md,.markdown,.csv,.json,.log"
                   >
                     <a-button>
                       <template #icon><upload-outlined /></template>
-                      上传图片
+                      上传文件
                     </a-button>
                   </a-upload>
-                  <span class="upload-tip">支持课堂截图、习题照片、讲义页面。</span>
+                  <span class="upload-tip">支持图片，以及 TXT / MD / CSV / JSON 等文本文件。</span>
                 </div>
 
                 <transition name="soft-rise">
-                  <div v-if="uploadedImage" class="image-preview">
-                    <img :src="uploadedImage" alt="上传预览" />
-                    <a-button type="link" danger @click="removeImage">移除图片</a-button>
+                  <div v-if="uploadedFile" class="file-preview">
+                    <img v-if="uploadedFile.kind === 'image'" :src="uploadedFile.dataUrl" alt="上传预览" />
+                    <div v-else class="file-summary">
+                      <div class="file-meta">
+                        <span class="file-name">{{ uploadedFile.name }}</span>
+                        <span class="file-size">{{ formatFileSize(uploadedFile.size) }} · 已读取文本</span>
+                      </div>
+                      <pre class="file-text-preview">{{ textPreview }}</pre>
+                    </div>
+                    <a-button type="link" danger @click="removeFile">移除文件</a-button>
                   </div>
                 </transition>
               </a-form-item>
@@ -70,26 +138,30 @@
                 <a-button
                   type="primary"
                   @click="submitQuestion"
-                  :disabled="(!question.trim() && !uploadedImage) || loading"
+                  :disabled="(!question.trim() && !uploadedFile) || loading"
                   :loading="loading"
                 >
                   {{ loading ? '生成中...' : '发送提问' }}
                 </a-button>
 
                 <a-button
-                  v-if="uploadedImage && !question.trim()"
+                  v-if="uploadedFile && !question.trim()"
                   type="dashed"
-                  @click="analyzeImageOnly"
+                  @click="analyzeFileOnly"
                   :loading="loading"
                 >
-                  仅分析图片
+                  仅分析文件
                 </a-button>
               </div>
             </a-form>
           </a-card>
 
           <transition name="soft-rise">
-            <a-card v-if="streamingAnswer || answer" class="surface-card panel-card answer-panel" title="回答结果">
+            <a-card
+              v-if="!selectedHistory && (streamingAnswer || answer)"
+              class="surface-card panel-card answer-panel"
+              title="回答结果"
+            >
               <template #extra>
                 <div class="answer-copy-toolbar">
                   <a-radio-group v-model:value="copyMode" size="small" button-style="solid">
@@ -131,44 +203,56 @@
             </a-card>
           </transition>
 
-          <a-card class="surface-card panel-card" title="提问历史">
-            <a-empty v-if="history.length === 0" description="还没有历史记录" />
-            <TransitionGroup v-else name="stack-reveal" tag="div" class="history-stack">
-              <article v-for="(item, index) in history" :key="item.id || `${index}-${item.question}`" class="history-entry">
-                <div class="record-head">
-                  <div class="history-question">
-                    <span class="history-kicker">Q{{ index + 1 }}</span>
-                    <h3>{{ item.question }}</h3>
-                  </div>
+          <transition name="soft-rise">
+            <a-card
+              v-if="selectedHistory"
+              class="surface-card panel-card history-detail-panel"
+              title="历史记录"
+            >
+              <template #extra>
+                <div class="history-detail-actions">
+                  <a-button size="small" @click="closeHistoryDetail">返回</a-button>
                   <a-popconfirm
                     title="确定删除这条提问记录吗？"
                     ok-text="删除"
                     cancel-text="取消"
-                    @confirm="deleteQuestionRecord(item)"
+                    @confirm="deleteHistoryRecord(selectedHistory)"
                   >
-                    <a-button type="text" danger size="small" @click.stop>
+                    <a-button type="text" danger size="small">
                       <template #icon><delete-outlined /></template>
                       删除
                     </a-button>
                   </a-popconfirm>
                 </div>
-                <div class="history-answer markdown-body" v-html="renderHistoryAnswer(item.answer)"></div>
-                <answer-cards
-                  v-if="item.ui"
-                  :ui="item.ui"
-                  :sources="item.trace ? item.trace.sources || [] : []"
-                  :chapters="chapterTitles"
-                  @follow-up="askFollowUp"
-                />
-                <tool-trace
-                  v-if="item.trace && item.trace.trace && item.trace.trace.length"
-                  :trace="item.trace.trace"
-                  :duration-ms="item.trace.durationMs || 0"
-                  compact
-                />
-              </article>
-            </TransitionGroup>
-          </a-card>
+              </template>
+
+              <div class="history-meta">
+                <span>{{ new Date(selectedHistory.timestamp).toLocaleString('zh-CN') }}</span>
+                <a-tag :color="selectedHistory.mode === 'deep' ? 'blue' : 'default'">
+                  {{ selectedHistory.mode === 'deep' ? '深度' : '快答' }}
+                </a-tag>
+              </div>
+
+              <div class="history-question">
+                <span class="history-kicker">Question</span>
+                <h3>{{ selectedHistory.question }}</h3>
+              </div>
+              <div class="history-answer markdown-body" v-html="renderHistoryAnswer(selectedHistory.answer)"></div>
+              <answer-cards
+                v-if="selectedHistory.ui"
+                :ui="selectedHistory.ui"
+                :sources="selectedHistory.trace ? selectedHistory.trace.sources || [] : []"
+                :chapters="chapterTitles"
+                @follow-up="askFollowUp"
+              />
+              <tool-trace
+                v-if="selectedHistory.trace && selectedHistory.trace.trace && selectedHistory.trace.trace.length"
+                :trace="selectedHistory.trace.trace"
+                :duration-ms="selectedHistory.trace.durationMs || 0"
+                compact
+              />
+            </a-card>
+          </transition>
         </a-col>
 
         <a-col :xs="24" :xl="8">
@@ -214,7 +298,7 @@
                 <div class="message-meta">
                   <span>{{ new Date(item.timestamp).toLocaleString('zh-CN') }}</span>
                   <div class="message-actions">
-                    <a-tag :color="item.status === 'replied' ? 'success' : 'default'">
+                    <a-tag :color="item.status === 'replied' ? 'success' : 'warning'">
                       {{ item.status === 'replied' ? '已回复' : '待回复' }}
                     </a-tag>
                     <a-popconfirm
@@ -244,34 +328,60 @@
           </a-card>
         </a-col>
       </a-row>
+      </div>
     </div>
   </div>
 </template>
 
 <script>
-import { computed, onMounted, ref } from 'vue'
+import { computed, nextTick, onMounted, ref } from 'vue'
 import axios from 'axios'
 import { marked } from 'marked'
 import katex from 'katex'
 import 'katex/dist/katex.min.css'
 import { message as toast } from 'ant-design-vue'
-import { CopyOutlined, DeleteOutlined, UploadOutlined } from '@ant-design/icons-vue'
+import { CopyOutlined, DeleteOutlined, MenuOutlined, PlusOutlined, UploadOutlined } from '@ant-design/icons-vue'
 import AnswerCards from '../components/cards/AnswerCards.vue'
 import ToolTrace from '../components/ToolTrace.vue'
 import CitationChips from '../components/cards/CitationChips.vue'
+import StudentSidebar from '../components/StudentSidebar.vue'
 import { readEventStream, TOOL_LABELS } from '../utils/sse'
 import { validateUI } from '../utils/uiCards'
 import { createTypewriter } from '../utils/typewriter'
+
+const IMAGE_EXTENSIONS = ['png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp']
+const TEXT_EXTENSIONS = ['txt', 'md', 'markdown', 'csv', 'json', 'log']
+const MAX_TEXT_CHARS = 12000
+const MAX_TEXT_FILE_BYTES = 2 * 1024 * 1024
+
+const readFileAsDataUrl = (file) =>
+  new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = (event) => resolve(event.target.result)
+    reader.onerror = reject
+    reader.readAsDataURL(file)
+  })
+
+const readFileAsText = (file) =>
+  new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = (event) => resolve(event.target.result)
+    reader.onerror = reject
+    reader.readAsText(file)
+  })
 
 export default {
   name: 'StudentView',
   components: {
     CopyOutlined,
     DeleteOutlined,
+    MenuOutlined,
+    PlusOutlined,
     UploadOutlined,
     AnswerCards,
     ToolTrace,
-    CitationChips
+    CitationChips,
+    StudentSidebar
   },
   setup() {
     const question = ref('')
@@ -284,8 +394,45 @@ export default {
     const messageToTeacher = ref('')
     const sendingMessage = ref(false)
     const messageSuccess = ref(false)
-    const uploadedImage = ref('')
+    const uploadedFile = ref(null)
     const copyMode = ref('markdown')
+
+    // 侧边栏 / 历史详情 / 学生插件
+    const sidebarOpen = ref(false)
+    const activePanel = ref('workspace')
+    const selectedHistoryId = ref(null)
+    const titleRequested = new Set()
+
+    const demoPlugins = [
+      {
+        glyph: '笔',
+        name: '错题本整理器',
+        description: '把每次提问中的错误与薄弱点整理进个人错题本，支持按章节回顾。',
+        installed: true
+      },
+      {
+        glyph: '式',
+        name: '公式推导助手',
+        description: '为数学、物理公式提供分步推导、单位校验和常见变式。',
+        installed: false
+      },
+      {
+        glyph: '图',
+        name: '讲义截图解析',
+        description: '读取课堂截图与讲义页面，提炼重点并生成复习卡片。',
+        installed: false
+      },
+      {
+        glyph: '划',
+        name: '学习计划生成器',
+        description: '根据错题记录与课程进度，自动生成一周复习计划。',
+        installed: false
+      }
+    ]
+
+    const selectedHistory = computed(
+      () => history.value.find((item) => item.id === selectedHistoryId.value) || null
+    )
 
     const agentUi = ref(null)
     const agentSources = ref([])
@@ -403,19 +550,85 @@ export default {
       }
     }
 
-    const handleImageUpload = (file) =>
-      new Promise((resolve, reject) => {
-        const reader = new FileReader()
-        reader.onload = (event) => {
-          uploadedImage.value = event.target.result
-          resolve(false)
-        }
-        reader.onerror = reject
-        reader.readAsDataURL(file)
-      })
+    const handleFileUpload = (file) => {
+      const extension = (file.name.split('.').pop() || '').toLowerCase()
+      const isImage = IMAGE_EXTENSIONS.includes(extension) || (file.type || '').startsWith('image/')
+      const isText = TEXT_EXTENSIONS.includes(extension) || (file.type || '').startsWith('text/')
 
-    const removeImage = () => {
-      uploadedImage.value = ''
+      if (isImage) {
+        return readFileAsDataUrl(file)
+          .then((dataUrl) => {
+            uploadedFile.value = {
+              kind: 'image',
+              name: file.name,
+              size: file.size,
+              dataUrl
+            }
+            return false
+          })
+          .catch((error) => {
+            console.error('读取图片失败:', error)
+            toast.error('图片读取失败，请重新选择')
+            return false
+          })
+      }
+
+      if (isText) {
+        if (file.size > MAX_TEXT_FILE_BYTES) {
+          toast.error(`文本文件过大，请上传小于 ${formatFileSize(MAX_TEXT_FILE_BYTES)} 的文件`)
+          return false
+        }
+
+        return readFileAsText(file)
+          .then((content) => {
+            const truncated = content.length > MAX_TEXT_CHARS
+            uploadedFile.value = {
+              kind: 'text',
+              name: file.name,
+              size: file.size,
+              text: truncated ? content.slice(0, MAX_TEXT_CHARS) : content
+            }
+            if (truncated) {
+              toast.info(`文件较长，已截取前 ${MAX_TEXT_CHARS} 个字符交给 AI 分析`)
+            }
+            return false
+          })
+          .catch((error) => {
+            console.error('读取文本文件失败:', error)
+            toast.error('文件读取失败，请重试')
+            return false
+          })
+      }
+
+      toast.error('暂不支持该文件格式，请上传图片或 TXT / MD / CSV / JSON 文件')
+      return false
+    }
+
+    const removeFile = () => {
+      uploadedFile.value = null
+    }
+
+    const formatFileSize = (bytes) => {
+      if (!bytes) return '0 B'
+      const units = ['B', 'KB', 'MB']
+      let value = bytes
+      let unitIndex = 0
+      while (value >= 1024 && unitIndex < units.length - 1) {
+        value /= 1024
+        unitIndex += 1
+      }
+      return `${value.toFixed(value >= 10 || unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`
+    }
+
+    const textPreview = computed(() => {
+      if (uploadedFile.value?.kind !== 'text') return ''
+      const content = uploadedFile.value.text
+      return content.length > 260 ? `${content.slice(0, 260)}…` : content
+    })
+
+    const buildFilePayload = () => {
+      if (uploadedFile.value?.kind !== 'text') return null
+      return { name: uploadedFile.value.name, content: uploadedFile.value.text }
     }
 
     const resetAgentState = () => {
@@ -487,23 +700,35 @@ export default {
       if (!answer.value) answer.value = streamingAnswer.value
     }
 
-    const analyzeImageOnly = async () => {
-      if (!uploadedImage.value) return
+    const analyzeFileOnly = async () => {
+      const file = uploadedFile.value
+      if (!file) return
 
       loading.value = true
+      selectedHistoryId.value = null
       answer.value = ''
       streamingAnswer.value = ''
       resetAgentState()
 
       try {
-        const response = await fetch('/api/multimodal/qa', {
+        const isImage = file.kind === 'image'
+        const response = await fetch(isImage ? '/api/multimodal/qa' : '/api/qa', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            image: uploadedImage.value.split(',')[1],
-            mode: 'fast',
-            uiVersion: 1
-          }),
+          body: JSON.stringify(
+            isImage
+              ? {
+                  image: file.dataUrl.split(',')[1],
+                  mode: 'fast',
+                  uiVersion: 1
+                }
+              : {
+                  question: '',
+                  file: buildFilePayload(),
+                  mode: currentMode.value,
+                  uiVersion: 1
+                }
+          ),
           credentials: 'include'
         })
 
@@ -513,8 +738,8 @@ export default {
       } catch (error) {
         // 保留已生成的部分回答，避免网络中断时内容凭空消失
         answer.value = streamingAnswer.value || ''
-        console.error('图片分析失败:', error)
-        alert(error.message || '图片分析失败，请稍后重试。')
+        console.error('文件分析失败:', error)
+        alert(error.message || '文件分析失败，请稍后重试。')
       } finally {
         loading.value = false
         streamingAnswer.value = ''
@@ -522,28 +747,32 @@ export default {
     }
 
     const submitQuestion = async () => {
-      if (!question.value.trim() && !uploadedImage.value) return
+      if (!question.value.trim() && !uploadedFile.value) return
 
       loading.value = true
+      selectedHistoryId.value = null
       answer.value = ''
       streamingAnswer.value = ''
       resetAgentState()
 
       try {
-        const withImage = Boolean(uploadedImage.value)
+        const file = uploadedFile.value
+        const withImage = file?.kind === 'image'
+        const payload = withImage
+          ? {
+              question: question.value,
+              image: file.dataUrl.split(',')[1],
+              mode: 'fast',
+              uiVersion: 1
+            }
+          : { question: question.value, mode: currentMode.value, uiVersion: 1 }
+        const filePayload = buildFilePayload()
+        if (filePayload) payload.file = filePayload
+
         const response = await fetch(withImage ? '/api/multimodal/qa' : '/api/qa', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(
-            withImage
-              ? {
-                  question: question.value,
-                  image: uploadedImage.value.split(',')[1],
-                  mode: 'fast',
-                  uiVersion: 1
-                }
-              : { question: question.value, mode: currentMode.value, uiVersion: 1 }
-          ),
+          body: JSON.stringify(payload),
           credentials: 'include'
         })
 
@@ -551,7 +780,7 @@ export default {
         answer.value = streamingAnswer.value
         await fetchQuestionHistory()
         question.value = ''
-        removeImage()
+        removeFile()
       } catch (error) {
         // 保留已生成的部分回答，避免网络中断时内容凭空消失
         answer.value = streamingAnswer.value || ''
@@ -600,6 +829,7 @@ export default {
           return {
             id: item.id,
             question: item.question,
+            title: item.title || '',
             answer: item.answer,
             timestamp: item.timestamp,
             mode: item.mode || 'fast',
@@ -607,9 +837,105 @@ export default {
             trace
           }
         })
+        // 历史标题由 LLM 懒生成：缺失标题的记录在后台补全，不阻塞页面渲染
+        backfillHistoryTitles()
       } catch (error) {
         console.error('加载提问历史失败:', error)
       }
+    }
+
+    // 旧记录 / 生成失败的记录：逐条请求后端用 LLM 补一个标题
+    const backfillHistoryTitles = async () => {
+      const pending = history.value
+        .filter((item) => item.id && !item.title && !titleRequested.has(item.id))
+        .slice(0, 12)
+
+      for (const item of pending) {
+        titleRequested.add(item.id)
+        try {
+          const response = await axios.post(`/api/questions/${item.id}/title`)
+          const title = response.data?.title
+          if (!title) continue
+          item.title = title
+          const current = history.value.find((record) => record.id === item.id)
+          if (current) current.title = title
+        } catch (error) {
+          console.error('生成历史标题失败:', error)
+        }
+      }
+    }
+
+    const selectHistory = (item) => {
+      if (!item || loading.value) return
+      activePanel.value = 'workspace'
+      selectedHistoryId.value = item.id
+      closeSidebar()
+      nextTick(() => {
+        document.querySelector('.history-detail-panel')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      })
+    }
+
+    const closeHistoryDetail = () => {
+      selectedHistoryId.value = null
+    }
+
+    const closeSidebar = () => {
+      sidebarOpen.value = false
+    }
+
+    const openWorkspace = () => {
+      activePanel.value = 'workspace'
+      closeSidebar()
+      window.scrollTo({ top: 0, behavior: 'smooth' })
+    }
+
+    const openPlugins = () => {
+      activePanel.value = 'plugin'
+      closeSidebar()
+      window.scrollTo({ top: 0, behavior: 'smooth' })
+    }
+
+    const startNewQuestion = () => {
+      if (loading.value) {
+        toast.info('正在生成回答，请稍候')
+        return
+      }
+      activePanel.value = 'workspace'
+      selectedHistoryId.value = null
+      question.value = ''
+      answer.value = ''
+      streamingAnswer.value = ''
+      resetAgentState()
+      removeFile()
+      closeSidebar()
+      window.scrollTo({ top: 0, behavior: 'smooth' })
+    }
+
+    const renameHistoryTitle = async (id, title) => {
+      const item = history.value.find((record) => record.id === id)
+      if (!item) return
+
+      const previousTitle = item.title
+      item.title = title
+      try {
+        const response = await axios.patch(`/api/questions/${id}/title`, { title })
+        item.title = response.data?.title || title
+        toast.success('标题已更新')
+      } catch (error) {
+        console.error('修改标题失败:', error)
+        item.title = previousTitle
+        toast.error(error.response?.data?.error || '标题更新失败，请稍后重试')
+      }
+    }
+
+    const deleteHistoryRecord = async (item) => {
+      if (!item?.id) return
+      await deleteQuestionRecord(item)
+      if (selectedHistoryId.value === item.id) selectedHistoryId.value = null
+    }
+
+    const showPluginHint = () => {
+      toast.info('插件安装将在后续版本开放')
     }
 
     const fetchMessages = async () => {
@@ -679,16 +1005,31 @@ export default {
       messageToTeacher,
       sendingMessage,
       messageSuccess,
-      uploadedImage,
+      uploadedFile,
       copyMode,
       UploadOutlined,
       CopyOutlined,
       DeleteOutlined,
+      sidebarOpen,
+      activePanel,
+      selectedHistoryId,
+      selectedHistory,
+      demoPlugins,
+      startNewQuestion,
+      openWorkspace,
+      openPlugins,
+      selectHistory,
+      closeHistoryDetail,
+      renameHistoryTitle,
+      deleteHistoryRecord,
+      showPluginHint,
       submitQuestion,
       sendMessageToTeacher,
-      handleImageUpload,
-      removeImage,
-      analyzeImageOnly,
+      handleFileUpload,
+      removeFile,
+      analyzeFileOnly,
+      formatFileSize,
+      textPreview,
       copyAnswer,
       deleteQuestionRecord,
       deleteMessageRecord,
@@ -844,7 +1185,7 @@ export default {
   font-size: 13px;
 }
 
-.image-preview {
+.file-preview {
   margin-top: 16px;
   padding: 16px;
   border-radius: 20px;
@@ -852,13 +1193,51 @@ export default {
   border: 1px solid rgba(255, 255, 255, 0.08);
 }
 
-.image-preview img {
+.file-preview img {
   display: block;
   width: 100%;
   max-height: 240px;
   object-fit: contain;
   border-radius: 14px;
   margin-bottom: 8px;
+}
+
+.file-summary {
+  margin-bottom: 8px;
+}
+
+.file-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.file-name {
+  color: rgba(255, 255, 255, 0.9);
+  font-weight: 600;
+  word-break: break-all;
+}
+
+.file-size {
+  color: rgba(255, 255, 255, 0.42);
+  font-size: 12px;
+}
+
+.file-text-preview {
+  max-height: 180px;
+  margin: 0;
+  padding: 14px;
+  overflow: auto;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.66);
+  font-size: 12px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .action-row {
@@ -912,13 +1291,11 @@ export default {
   color: rgba(255, 255, 255, 0.62);
 }
 
-.history-stack,
 .message-stack {
   display: grid;
   gap: 16px;
 }
 
-.history-entry,
 .message-entry {
   padding: 20px;
   border-radius: 22px;
@@ -927,28 +1304,15 @@ export default {
   transition: transform 0.32s ease, border-color 0.32s ease, background 0.32s ease;
 }
 
-.history-entry:hover,
 .message-entry:hover {
   transform: translateY(-3px);
   border-color: rgba(255, 255, 255, 0.14);
   background: rgba(255, 255, 255, 0.045);
 }
 
-.record-head {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  align-items: flex-start;
-  margin-bottom: 18px;
-}
-
 .history-question {
   margin-bottom: 18px;
   min-width: 0;
-}
-
-.record-head .history-question {
-  margin-bottom: 0;
 }
 
 .history-kicker {
@@ -1180,5 +1544,196 @@ export default {
 .mode-hint {
   font-size: 12px;
   color: rgba(255, 255, 255, 0.45);
+}
+
+/* ========================== 左侧边栏 / 历史详情 / 学生插件 ========================== */
+.workspace-main {
+  min-height: 100%;
+}
+
+.sidebar-toggle {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 12px;
+  background: rgba(15, 15, 16, 0.86);
+  color: rgba(255, 255, 255, 0.8);
+  font-size: 16px;
+  cursor: pointer;
+}
+
+.sidebar-backdrop {
+  position: fixed;
+  inset: 76px 0 0 0;
+  z-index: 25;
+  background: rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(2px);
+}
+
+.history-detail-panel :deep(.ant-card-body) {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.history-detail-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.history-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: rgba(255, 255, 255, 0.38);
+  font-size: 12px;
+}
+
+.history-detail-panel .history-question {
+  margin-bottom: 0;
+}
+
+.plugin-page {
+  padding-top: 14px;
+}
+
+.plugin-hero {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: 24px;
+  margin-bottom: 28px;
+}
+
+.plugin-hero h1 {
+  margin: 0 0 12px;
+  font-size: clamp(30px, 4.5vw, 52px);
+  line-height: 1.04;
+  letter-spacing: -0.04em;
+  animation: revealUp 0.88s ease both;
+}
+
+.plugin-hero p {
+  max-width: 640px;
+  margin: 0;
+  color: rgba(255, 255, 255, 0.56);
+  line-height: 1.8;
+}
+
+.plugin-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+  gap: 18px;
+  margin-bottom: 24px;
+}
+
+.plugin-card {
+  animation: revealUp 0.82s ease both;
+}
+
+.plugin-card :deep(.ant-card-body) {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 20px;
+}
+
+.plugin-card h3 {
+  margin: 0;
+  color: rgba(255, 255, 255, 0.95);
+  font-size: 18px;
+}
+
+.plugin-card p {
+  min-height: 66px;
+  margin: 0;
+  color: rgba(255, 255, 255, 0.55);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.plugin-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+}
+
+.plugin-glyph {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  border-radius: 12px;
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.24), rgba(255, 255, 255, 0.06));
+  color: #0b0b0b;
+  font-weight: 600;
+}
+
+.plugin-card-foot {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+.plugin-add-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 220px;
+  padding: 24px;
+  border: 1px dashed rgba(255, 255, 255, 0.16);
+  border-radius: var(--radius-lg);
+  background: rgba(255, 255, 255, 0.015);
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 14px;
+  cursor: pointer;
+  transition: border-color 0.25s ease, background 0.25s ease, transform 0.25s ease;
+}
+
+.plugin-add-card:hover {
+  border-color: rgba(255, 255, 255, 0.3);
+  background: rgba(255, 255, 255, 0.04);
+  color: rgba(255, 255, 255, 0.8);
+  transform: translateY(-3px);
+}
+
+@media (min-width: 1025px) {
+  .workspace-page {
+    padding-left: 280px;
+  }
+}
+
+@media (max-width: 1024px) {
+  .sidebar-toggle {
+    display: inline-flex;
+    position: fixed;
+    top: 88px;
+    left: 14px;
+    z-index: 24;
+  }
+
+  .workspace-main {
+    padding-top: 34px;
+  }
+
+  .plugin-hero {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}
+
+@media (max-width: 768px) {
+  .sidebar-toggle {
+    top: 84px;
+  }
 }
 </style>
