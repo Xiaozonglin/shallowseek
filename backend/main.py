@@ -16,6 +16,8 @@ from flask_bcrypt import Bcrypt
 from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
 from flask_mail import Mail, Message as MailMessage
 
+from modules import answer_modes
+
 # ========================== 基础与安全配置 ==========================
 from dotenv import load_dotenv
 load_dotenv()
@@ -106,6 +108,9 @@ class Question(db.Model):
     # 隐私边界：问答默认仅学生本人可见，只有学生主动提交后教师端才能查看/回答
     shared = db.Column(db.Boolean, nullable=False, default=False)
     shared_at = db.Column(db.DateTime, nullable=True)
+    # 回答效果：模板（学习新知/复习旧知/探索未知）× 交流方式（逐轮短对话/长对话）
+    template = db.Column(db.String(20), default=answer_modes.DEFAULT_TEMPLATE)
+    style = db.Column(db.String(20), default=answer_modes.DEFAULT_STYLE)
 
 
 class Message(db.Model):
@@ -304,6 +309,8 @@ def get_student_question_history():
             "trace": _load(q.trace_json),
             "shared": bool(q.shared),
             "shared_at": q.shared_at.isoformat() if q.shared_at else None,
+            "template": q.template or answer_modes.DEFAULT_TEMPLATE,
+            "style": q.style or answer_modes.DEFAULT_STYLE,
         }
         for q in questions
     ]), 200
@@ -375,6 +382,7 @@ def get_agent_meta():
         "uiVersion": 1,
         "modes": ["fast", "deep"],
         "chapters": available_chapter_payload(),
+        "answerModes": answer_modes.metadata(),
     }), 200
 
 
@@ -409,7 +417,7 @@ def _question_record_content(query, image_base64=None, file_name="", file_contex
     return query
 
 
-def _save_question(student_id, content_text, answer_text, ui_payload=None, trace_payload=None, mode="fast"):
+def _save_question(student_id, content_text, answer_text, ui_payload=None, trace_payload=None, mode="fast", template=None, style=None):
     with app.app_context():
         record = Question(
             content=content_text,
@@ -418,14 +426,16 @@ def _save_question(student_id, content_text, answer_text, ui_payload=None, trace
             ui_json=json.dumps(ui_payload, ensure_ascii=False) if ui_payload else None,
             trace_json=json.dumps(trace_payload, ensure_ascii=False) if trace_payload else None,
             mode=mode,
+            template=answer_modes.normalize_template(template),
+            style=answer_modes.normalize_style(style),
         )
         db.session.add(record)
         db.session.commit()
         return record.id
 
 
-def _build_fast_prompt(student_id, query, image_base64, file_name="", file_context=""):
-    """快答模式上下文：教师权威答案 + BM25 检索 + 最近历史 + 上传文件（无工具循环）。"""
+def _build_fast_prompt(student_id, query, image_base64, file_name="", file_context="", template=None, style=None):
+    """快答模式上下文：教师权威答案 + BM25 检索 + 最近历史 + 上传文件 + 回答效果（无工具循环）。"""
     context = ""
     history_text = get_user_history(student_id)
     authority_matched = False
@@ -442,6 +452,7 @@ def _build_fast_prompt(student_id, query, image_base64, file_name="", file_conte
         "如果用户上传了图片，请精确识别其中的文字、公式或逻辑结构并进行解答。"
         "如果用户上传了文件，请先阅读文件内容，再结合用户问题作答。"
     )
+    system_content += "\n\n" + answer_modes.mode_instructions(template, style)
     if context:
         system_content += f"\n\n背景上下文:\n{context}"
     if file_context:
@@ -459,34 +470,36 @@ def _build_fast_prompt(student_id, query, image_base64, file_name="", file_conte
     return system_content, final_query, image_data_url, authority_matched
 
 
-def _legacy_fast_stream(student_id, query, image_base64, file_name="", file_context=""):
+def _legacy_fast_stream(student_id, query, image_base64, file_name="", file_context="", template=None, style=None):
     """旧客户端（不传 uiVersion）：保持 data:{"token"} 契约，纯文本流式。"""
     full_answer = ""
     try:
         system_content, final_query, image_data_url, _authority_matched = _build_fast_prompt(
-            student_id, query, image_base64, file_name, file_context
+            student_id, query, image_base64, file_name, file_context, template, style
         )
         for token in ai.stream_answer(system_content, final_query, image_data_url=image_data_url):
             full_answer += token
             yield f"data: {json.dumps({'token': token})}\n\n"
 
         db_content = _question_record_content(query, image_base64, file_name, file_context)
-        _save_question(student_id, db_content, full_answer, mode="fast")
+        _save_question(student_id, db_content, full_answer, mode="fast", template=template, style=style)
         yield f"data: {json.dumps({'done': True})}\n\n"
     except Exception as exc:
         logger.exception("AI 回答失败")
         yield f"data: {json.dumps({'error': ai.friendly_error(exc)}, ensure_ascii=False)}\n\n"
 
 
-def _typed_fast_stream(student_id, query, image_base64, file_name="", file_context=""):
+def _typed_fast_stream(student_id, query, image_base64, file_name="", file_context="", template=None, style=None):
     """新客户端 + 快答：统一事件协议，无工具、无卡片。"""
     answer = ""
+    template_id = answer_modes.normalize_template(template)
+    style_id = answer_modes.normalize_style(style)
     started = _time.monotonic()
     try:
         yield _sse({"type": "start", "mode": "fast", "uiVersion": 1})
         yield _sse({"type": "status", "stage": "answer", "message": "正在生成回答…"})
         system_content, final_query, image_data_url, authority_matched = _build_fast_prompt(
-            student_id, query, image_base64, file_name, file_context
+            student_id, query, image_base64, file_name, file_context, template_id, style_id
         )
         for token in ai.stream_answer(system_content, final_query, image_data_url=image_data_url):
             answer += token
@@ -499,6 +512,8 @@ def _typed_fast_stream(student_id, query, image_base64, file_name="", file_conte
             "durationMs": duration_ms,
             "mode": "fast",
             "authorityMatched": authority_matched,
+            "template": template_id,
+            "style": style_id,
         }
         yield _sse({
             "type": "complete",
@@ -508,24 +523,32 @@ def _typed_fast_stream(student_id, query, image_base64, file_name="", file_conte
             "durationMs": duration_ms,
             "mode": "fast",
             "authorityMatched": authority_matched,
+            "template": template_id,
+            "style": style_id,
         })
         db_content = _question_record_content(query, image_base64, file_name, file_context)
-        record_id = _save_question(student_id, db_content, answer, trace_payload=trace_payload, mode="fast")
+        record_id = _save_question(
+            student_id, db_content, answer, trace_payload=trace_payload, mode="fast", template=template_id, style=style_id
+        )
         yield _sse({
             "type": "done",
             "saved": True,
             "messageId": record_id,
             "mode": "fast",
             "authorityMatched": authority_matched,
+            "template": template_id,
+            "style": style_id,
         })
     except Exception as exc:
         logger.exception("AI 回答失败")
         yield _sse({"type": "error", "code": "ai_error", "message": ai.friendly_error(exc)})
 
 
-def _typed_deep_stream(student_id, query, file_name="", file_context=""):
+def _typed_deep_stream(student_id, query, file_name="", file_context="", template=None, style=None):
     """新客户端 + 深度：进程内 Agent 工具循环，流式事件 + 卡片。上传文件内容并入 Agent 提问。"""
     answer = ""
+    template_id = answer_modes.normalize_template(template)
+    style_id = answer_modes.normalize_style(style)
     saved_ui = None
     completed = None
     failed = False
@@ -551,7 +574,12 @@ def _typed_deep_stream(student_id, query, file_name="", file_context=""):
                 if query
                 else f"请阅读并分析以下文件内容，提炼关键信息并给出要点：\n\n{file_block}"
             )
-        run_kwargs = {"history_text": history_text, "ui_enabled": True}
+        run_kwargs = {
+            "history_text": history_text,
+            "ui_enabled": True,
+            "template": template_id,
+            "style": style_id,
+        }
         if authority_matched:
             run_kwargs["authoritative_context"] = authority_context
         for event in agent_runtime.run(agent_question, **run_kwargs):
@@ -563,7 +591,12 @@ def _typed_deep_stream(student_id, query, file_name="", file_context=""):
             elif event_type == "ui":
                 saved_ui = event.get("ui")
             elif event_type == "complete":
-                event = {**event, "authorityMatched": authority_matched}
+                event = {
+                    **event,
+                    "authorityMatched": authority_matched,
+                    "template": template_id,
+                    "style": style_id,
+                }
                 completed = event
                 answer = event.get("answer") or answer
             elif event_type == "error":
@@ -579,6 +612,8 @@ def _typed_deep_stream(student_id, query, file_name="", file_context=""):
             "durationMs": completed.get("durationMs", 0),
             "mode": "deep",
             "authorityMatched": authority_matched,
+            "template": template_id,
+            "style": style_id,
         }
         record_id = _save_question(
             student_id,
@@ -587,6 +622,8 @@ def _typed_deep_stream(student_id, query, file_name="", file_context=""):
             ui_payload=saved_ui,
             trace_payload=trace_payload,
             mode="deep",
+            template=template_id,
+            style=style_id,
         )
         yield _sse({
             "type": "done",
@@ -595,6 +632,8 @@ def _typed_deep_stream(student_id, query, file_name="", file_context=""):
             "ui": saved_ui,
             "mode": "deep",
             "authorityMatched": authority_matched,
+            "template": template_id,
+            "style": style_id,
         })
     except Exception as exc:
         logger.exception("Agent 回答失败")
@@ -610,6 +649,15 @@ def handle_qa():
     query = sanitize_input(data.get("question", ""))
     image_base64 = data.get("image")
     file_name, file_context = _parse_file_payload(data)
+
+    template = data.get("template")
+    style = data.get("style")
+    if template is not None and not answer_modes.is_valid_template(template):
+        return flask.jsonify({"error": "不支持的模板"}), 400
+    if style is not None and not answer_modes.is_valid_style(style):
+        return flask.jsonify({"error": "不支持的交流方式"}), 400
+    template = answer_modes.normalize_template(template)
+    style = answer_modes.normalize_style(style)
 
     if not query and not image_base64 and not file_context:
         return flask.jsonify({"error": "请求内容为空"}), 400
@@ -627,11 +675,11 @@ def handle_qa():
     typed = ui_version == 1
 
     if typed and mode == "deep" and not image_base64:
-        stream = _typed_deep_stream(student_id, query, file_name, file_context)
+        stream = _typed_deep_stream(student_id, query, file_name, file_context, template, style)
     elif typed:
-        stream = _typed_fast_stream(student_id, query, image_base64, file_name, file_context)
+        stream = _typed_fast_stream(student_id, query, image_base64, file_name, file_context, template, style)
     else:
-        stream = _legacy_fast_stream(student_id, query, image_base64, file_name, file_context)
+        stream = _legacy_fast_stream(student_id, query, image_base64, file_name, file_context, template, style)
 
     response = Response(stream_with_context(stream), mimetype="text/event-stream")
     response.headers["Cache-Control"] = "no-cache"
@@ -934,6 +982,8 @@ def ensure_schema():
             "title": "VARCHAR(120)",
             "shared": "BOOLEAN DEFAULT 0",
             "shared_at": "DATETIME",
+            "template": "VARCHAR(20)",
+            "style": "VARCHAR(20)",
         }
         first_privacy_migration = "shared" not in columns
         with db.engine.begin() as connection:
