@@ -318,10 +318,13 @@ def _build_fast_prompt(student_id, query, image_base64):
     """快答模式上下文：教师权威答案 + BM25 检索 + 最近历史（无工具循环）。"""
     context = ""
     history_text = get_user_history(student_id)
+    authority_matched = False
     if query:
         if not image_base64:
             context += ai.safe_math(query)
-        context += get_authoritative_context(query)
+        authority_context = get_authoritative_context(query)
+        authority_matched = bool(authority_context.strip())
+        context += authority_context
         context += ai.retrieve_context(query)
 
     system_content = (
@@ -335,14 +338,14 @@ def _build_fast_prompt(student_id, query, image_base64):
 
     image_data_url = ai.to_data_url(image_base64) if image_base64 else None
     final_query = query or "请详细提取和描述这张图片中的所有关键信息、数字与文字。"
-    return system_content, final_query, image_data_url
+    return system_content, final_query, image_data_url, authority_matched
 
 
 def _legacy_fast_stream(student_id, query, image_base64):
     """旧客户端（不传 uiVersion）：保持 data:{"token"} 契约，纯文本流式。"""
     full_answer = ""
     try:
-        system_content, final_query, image_data_url = _build_fast_prompt(student_id, query, image_base64)
+        system_content, final_query, image_data_url, _authority_matched = _build_fast_prompt(student_id, query, image_base64)
         for token in ai.stream_answer(system_content, final_query, image_data_url=image_data_url):
             full_answer += token
             yield f"data: {json.dumps({'token': token})}\n\n"
@@ -362,17 +365,39 @@ def _typed_fast_stream(student_id, query, image_base64):
     try:
         yield _sse({"type": "start", "mode": "fast", "uiVersion": 1})
         yield _sse({"type": "status", "stage": "answer", "message": "正在生成回答…"})
-        system_content, final_query, image_data_url = _build_fast_prompt(student_id, query, image_base64)
+        system_content, final_query, image_data_url, authority_matched = _build_fast_prompt(
+            student_id, query, image_base64
+        )
         for token in ai.stream_answer(system_content, final_query, image_data_url=image_data_url):
             answer += token
             yield _sse({"type": "answer_delta", "text": token})
 
         duration_ms = int((_time.monotonic() - started) * 1000)
-        trace_payload = {"trace": [], "sources": [], "durationMs": duration_ms, "mode": "fast"}
-        yield _sse({"type": "complete", "answer": answer, "sources": [], "trace": [], "durationMs": duration_ms, "mode": "fast"})
+        trace_payload = {
+            "trace": [],
+            "sources": [],
+            "durationMs": duration_ms,
+            "mode": "fast",
+            "authorityMatched": authority_matched,
+        }
+        yield _sse({
+            "type": "complete",
+            "answer": answer,
+            "sources": [],
+            "trace": [],
+            "durationMs": duration_ms,
+            "mode": "fast",
+            "authorityMatched": authority_matched,
+        })
         db_content = f"[图像] {query[:50]}" if image_base64 else query
         record_id = _save_question(student_id, db_content, answer, trace_payload=trace_payload, mode="fast")
-        yield _sse({"type": "done", "saved": True, "messageId": record_id, "mode": "fast"})
+        yield _sse({
+            "type": "done",
+            "saved": True,
+            "messageId": record_id,
+            "mode": "fast",
+            "authorityMatched": authority_matched,
+        })
     except Exception as exc:
         logger.exception("AI 回答失败")
         yield _sse({"type": "error", "code": "ai_error", "message": ai.friendly_error(exc)})
@@ -387,7 +412,21 @@ def _typed_deep_stream(student_id, query):
     try:
         yield _sse({"type": "start", "mode": "deep", "uiVersion": 1})
         history_text = get_user_history(student_id)
-        for event in agent_runtime.run(query, history_text=history_text, ui_enabled=True):
+
+        # 教师权威答案在快答/深度两条路径都必须生效：深度模式先词法匹配，再注入 Agent 提示词
+        authority_context = get_authoritative_context(query) if query else ""
+        authority_matched = bool(authority_context.strip())
+        if authority_matched:
+            yield _sse({
+                "type": "status",
+                "stage": "authority",
+                "message": "已匹配到教师权威答案，将优先采用",
+            })
+
+        run_kwargs = {"history_text": history_text, "ui_enabled": True}
+        if authority_matched:
+            run_kwargs["authoritative_context"] = authority_context
+        for event in agent_runtime.run(query, **run_kwargs):
             event_type = event.get("type")
             if event_type == "answer_delta":
                 answer += event.get("text", "")
@@ -396,6 +435,7 @@ def _typed_deep_stream(student_id, query):
             elif event_type == "ui":
                 saved_ui = event.get("ui")
             elif event_type == "complete":
+                event = {**event, "authorityMatched": authority_matched}
                 completed = event
                 answer = event.get("answer") or answer
             elif event_type == "error":
@@ -410,11 +450,19 @@ def _typed_deep_stream(student_id, query):
             "sources": completed.get("sources", []),
             "durationMs": completed.get("durationMs", 0),
             "mode": "deep",
+            "authorityMatched": authority_matched,
         }
         record_id = _save_question(
             student_id, query, answer, ui_payload=saved_ui, trace_payload=trace_payload, mode="deep"
         )
-        yield _sse({"type": "done", "saved": True, "messageId": record_id, "ui": saved_ui, "mode": "deep"})
+        yield _sse({
+            "type": "done",
+            "saved": True,
+            "messageId": record_id,
+            "ui": saved_ui,
+            "mode": "deep",
+            "authorityMatched": authority_matched,
+        })
     except Exception as exc:
         logger.exception("Agent 回答失败")
         yield _sse({"type": "error", "code": "ai_error", "message": ai.friendly_error(exc)})
